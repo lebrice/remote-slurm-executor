@@ -327,9 +327,9 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             self.login_node.run(
                 f"git clone {remote_url} -b {current_branch} {self.repo_dir}"
             )
-
+        assert not self.I_dont_care_about_reproducibility
         self.login_node.run(
-            f"cd {self.repo_dir} && git fetch && git checkout {current_branch}"
+            f"cd {self.repo_dir} && git fetch && git checkout {current_branch} && git checkout {current_commit}"
         )
 
     def _setup_uv(self) -> str:
@@ -355,9 +355,10 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
     @property
     def _submitit_command_str(self) -> str:
-        # Changed from the base class.
-        return super()._submitit_command_str
-        return f" -u -m submitit.core._submit {shlex.quote(str(self.remote_folder))}"
+        # Changed from the base class: Points to the remote folder instead of the local folder.
+        # Also: `self.python` is `uv run --python=X.Y python`
+        # return " ".join([self.python, "-u -m submitit.core._submit", shlex.quote(str(self.folder))])
+        return f"{self.python} -u -m submitit.core._submit {shlex.quote(str(self.remote_folder))}"
 
     def _submit_command(self, command: str) -> core.Job:
         # Copied and adapted from PicklingExecutor.
