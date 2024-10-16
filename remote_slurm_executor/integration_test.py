@@ -4,7 +4,7 @@ import pytest
 import rich.logging
 import submitit
 
-import remote_slurm_launcher
+import remote_slurm_executor
 
 logging.basicConfig(
     format="%(message)s", level=logging.INFO, handlers=[rich.logging.RichHandler()]
@@ -25,7 +25,7 @@ def executor():
         remoteslurm_repo_dir_on_cluster="repos/remote-submitit-launcher",
         # remoteslurm_I_dont_care_about_reproducibility=False,
     )
-    assert isinstance(executor._executor, remote_slurm_launcher.RemoteSlurmExecutor)
+    assert isinstance(executor._executor, remote_slurm_executor.RemoteSlurmExecutor)
     try:
         yield executor
     finally:
@@ -33,7 +33,7 @@ def executor():
         executor._executor.remote_dir_mount.unmount()
 
 
-def test_add(executor: remote_slurm_launcher.RemoteSlurmExecutor):
+def test_add(executor: remote_slurm_executor.RemoteSlurmExecutor):
     # assert False, list(pkg_resources.iter_entry_points("submitit"))
     # the AutoExecutor class is your interface for submitting function to a cluster or run them locally.
     # The specified folder is used to dump job information, logs and result when finished

@@ -1,9 +1,9 @@
 [project]
-name = "remote_submitit_launcher"
+name = "remote_slurm_executor"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = ["milatools>=0.1.5", "setuptools>=75.2.0", "submitit>=1.5.2"]
 
 [project.entry-points."submitit"]

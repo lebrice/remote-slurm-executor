@@ -1,8 +1,6 @@
-# Copyright (c) Facebook, Inc. and its affiliates.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
-#
+""" TODO: Tests for the SlurmExecutor inside the submitit codebase. Not running atm.
+
+"""
 import contextlib
 import os
 import signal
@@ -12,12 +10,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
 import submitit
+from submitit import helpers
+from submitit.core import job_environment, submission, test_core, utils
+from submitit.core.core import Job
 
-from .. import helpers
-from ..core import job_environment, submission, test_core, utils
-from ..core.core import Job
 from . import slurm_remote
 
 
