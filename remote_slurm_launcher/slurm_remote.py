@@ -320,10 +320,11 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             # https://stackoverflow.com/questions/4089430/how-to-determine-the-url-that-a-local-git-repository-was-originally-cloned-from
             remote_url = LocalV2.get_output("git config --get remote.origin.url")
             # https://stackoverflow.com/a/9753364/6388696
-            current_remote = LocalV2.get_output(
-                "git rev-parse --abbrev-ref --symbolic-full-name @{u}"
-            )
-            self.login_node.run(f"git clone {remote_url} -b {current_remote}")
+            # current_remote = LocalV2.get_output(
+            #     "git rev-parse --abbrev-ref --symbolic-full-name @{u}"
+            # )
+            current_branch = LocalV2.get_output("git rev-parse --abbrev-ref HEAD")
+            self.login_node.run(f"git clone {remote_url} -b {current_branch}")
 
         self.login_node.run(
             f"cd {self.repo_dir} && git fetch && git checkout {current_commit}"
