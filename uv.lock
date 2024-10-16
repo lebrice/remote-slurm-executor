@@ -390,7 +390,7 @@ wheels = [
 ]
 
 [[package]]
-name = "remote-submitit-launcher"
+name = "remote-slurm-executor"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
