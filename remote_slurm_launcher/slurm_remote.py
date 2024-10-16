@@ -19,7 +19,6 @@ from typing import ClassVar
 from milatools.utils.compute_node import ComputeNode
 from milatools.utils.local_v2 import LocalV2
 from milatools.utils.remote_v2 import RemoteV2
-
 from submitit.core import core, job_environment, utils
 from submitit.slurm import slurm
 from submitit.slurm.slurm import SlurmInfoWatcher, SlurmJobEnvironment
@@ -221,9 +220,10 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
     def __init__(
         self,
+        folder: PurePath | str,
+        *,
         cluster: str,
         repo_dir_on_cluster: str | PurePosixPath,
-        folder: PurePath | str,
         internet_access_on_compute_nodes: bool = True,
         max_num_timeout: int = 3,
         python: str | None = None,
@@ -314,7 +314,9 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         current_commit = LocalV2.get_output("git rev-parse HEAD")
 
         # If the repo doesn't exist on the remote, clone it:
-        if not self.login_node.get_output(f"test -d {self.repo_dir}"):
+        if self.login_node.run(
+            f"test -d {self.repo_dir}", warn=True, hide=True
+        ).returncode:
             # https://stackoverflow.com/questions/4089430/how-to-determine-the-url-that-a-local-git-repository-was-originally-cloned-from
             remote_url = LocalV2.get_output("git config --get remote.origin.url")
             # https://stackoverflow.com/a/9753364/6388696

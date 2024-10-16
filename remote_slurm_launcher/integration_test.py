@@ -1,10 +1,10 @@
 import logging
 
 import rich.logging
+import submitit
 
 # import submitit
 # import submitit.slurm_remote
-from remote_slurm_launcher import RemoteSlurmExecutor
 
 logging.basicConfig(
     format="%(message)s", level=logging.INFO, handlers=[rich.logging.RichHandler()]
@@ -17,14 +17,16 @@ def add(a, b):
 
 
 def test_add(tmp_path):
+    # assert False, list(pkg_resources.iter_entry_points("submitit"))
     # the AutoExecutor class is your interface for submitting function to a cluster or run them locally.
     # The specified folder is used to dump job information, logs and result when finished
     # %j is replaced by the job id at runtime
-    executor = RemoteSlurmExecutor(
-        cluster="mila",
-        repo_dir_on_cluster="repos/submitit",
+    executor = submitit.AutoExecutor(
         folder="logs",  # todo: perhaps we can rename this folder?
-        I_dont_care_about_reproducibility=True,
+        cluster="remoteslurm",
+        remoteslurm_cluster="mila",
+        remoteslurm_repo_dir_on_cluster="repos/remote-submitit-launcher",
+        remoteslurm_I_dont_care_about_reproducibility=True,
     )
     # The AutoExecutor provides a simple abstraction over SLURM to simplify switching between local and slurm jobs (or other clusters if plugins are available).
     # specify sbatch parameters (here it will timeout after 4min, and run on dev)
