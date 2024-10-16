@@ -23,7 +23,7 @@ def executor():
         cluster="remoteslurm",
         remoteslurm_cluster="mila",
         remoteslurm_repo_dir_on_cluster="repos/remote-submitit-launcher",
-        remoteslurm_I_dont_care_about_reproducibility=True,
+        # remoteslurm_I_dont_care_about_reproducibility=False,
     )
     assert isinstance(executor._executor, remote_slurm_launcher.RemoteSlurmExecutor)
     try:
