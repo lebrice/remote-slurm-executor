@@ -312,6 +312,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             exit()
 
         current_commit = LocalV2.get_output("git rev-parse HEAD")
+        current_branch = LocalV2.get_output("git rev-parse --abbrev-ref HEAD")
 
         # If the repo doesn't exist on the remote, clone it:
         if self.login_node.run(
@@ -323,11 +324,12 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             # current_remote = LocalV2.get_output(
             #     "git rev-parse --abbrev-ref --symbolic-full-name @{u}"
             # )
-            current_branch = LocalV2.get_output("git rev-parse --abbrev-ref HEAD")
-            self.login_node.run(f"git clone {remote_url} -b {current_branch}")
+            self.login_node.run(
+                f"git clone {remote_url} -b {current_branch} {self.repo_dir}"
+            )
 
         self.login_node.run(
-            f"cd {self.repo_dir} && git fetch && git checkout {current_commit}"
+            f"cd {self.repo_dir} && git fetch && git checkout {current_branch}"
         )
 
     def _setup_uv(self) -> str:

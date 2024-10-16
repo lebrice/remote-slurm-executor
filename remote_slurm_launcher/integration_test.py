@@ -1,10 +1,10 @@
 import logging
 
+import pytest
 import rich.logging
 import submitit
 
-# import submitit
-# import submitit.slurm_remote
+import remote_slurm_launcher
 
 logging.basicConfig(
     format="%(message)s", level=logging.INFO, handlers=[rich.logging.RichHandler()]
@@ -16,18 +16,29 @@ def add(a, b):
     return a + b
 
 
-def test_add(tmp_path):
-    # assert False, list(pkg_resources.iter_entry_points("submitit"))
-    # the AutoExecutor class is your interface for submitting function to a cluster or run them locally.
-    # The specified folder is used to dump job information, logs and result when finished
-    # %j is replaced by the job id at runtime
+@pytest.fixture()
+def executor():
     executor = submitit.AutoExecutor(
-        folder="logs",  # todo: perhaps we can rename this folder?
+        folder="logs/%j",  # todo: perhaps we can rename this folder?
         cluster="remoteslurm",
         remoteslurm_cluster="mila",
         remoteslurm_repo_dir_on_cluster="repos/remote-submitit-launcher",
         remoteslurm_I_dont_care_about_reproducibility=True,
     )
+    assert isinstance(executor._executor, remote_slurm_launcher.RemoteSlurmExecutor)
+    try:
+        yield executor
+    finally:
+        assert executor._executor.remote_dir_mount
+        executor._executor.remote_dir_mount.unmount()
+
+
+def test_add(executor: remote_slurm_launcher.RemoteSlurmExecutor):
+    # assert False, list(pkg_resources.iter_entry_points("submitit"))
+    # the AutoExecutor class is your interface for submitting function to a cluster or run them locally.
+    # The specified folder is used to dump job information, logs and result when finished
+    # %j is replaced by the job id at runtime
+
     # The AutoExecutor provides a simple abstraction over SLURM to simplify switching between local and slurm jobs (or other clusters if plugins are available).
     # specify sbatch parameters (here it will timeout after 4min, and run on dev)
     # This is where you would specify `gpus_per_node=1` for instance
