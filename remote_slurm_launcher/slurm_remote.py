@@ -311,6 +311,8 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             )
             exit()
 
+        LocalV2.run("git push")
+
         current_commit = LocalV2.get_output("git rev-parse HEAD")
         current_branch = LocalV2.get_output("git rev-parse --abbrev-ref HEAD")
 

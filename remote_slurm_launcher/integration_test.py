@@ -56,4 +56,3 @@ def test_add(executor: remote_slurm_launcher.RemoteSlurmExecutor):
     # if ever the job failed, job.result() will raise an error with the corresponding trace
     assert output == 12  # 5 + 7 = 12...  your addition was computed in the cluster
     print(output)
-    executor.remote_dir_mount.unmount()
