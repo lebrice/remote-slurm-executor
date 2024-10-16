@@ -302,16 +302,15 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
     def sync_source_code(self):
         # TODOS:
         # - Sync the source code using git?
-        if not self.I_dont_care_about_reproducibility and LocalV2.get_output(
-            ("git", "status", "--porcelain")
-        ):
-            print(
-                "You have uncommitted changes, please commit and push them before trying again.",
-                file=sys.stderr,
-            )
-            exit()
+        if not self.I_dont_care_about_reproducibility:
+            if LocalV2.get_output("git status --porcelain"):
+                print(
+                    "You have uncommitted changes, please commit and push them before trying again.",
+                    file=sys.stderr,
+                )
+                exit()
 
-        LocalV2.run("git push")
+            LocalV2.run("git push")
 
         current_commit = LocalV2.get_output("git rev-parse HEAD")
         current_branch = LocalV2.get_output("git rev-parse --abbrev-ref HEAD")
