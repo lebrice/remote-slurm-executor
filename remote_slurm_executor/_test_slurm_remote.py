@@ -74,7 +74,9 @@ def test_slurm_job_mocked(
     mocked_slurm: test_core.MockedSubprocess, tmp_path: Path, cluster: str
 ) -> None:
     mock = mocked_slurm
-    executor = slurm_remote.RemoteSlurmExecutor(cluster=cluster, folder=tmp_path)
+    executor = slurm_remote.RemoteSlurmExecutor(
+        cluster_hostname=cluster, folder=tmp_path
+    )
     job = executor.submit(test_core.do_nothing, 1, 2, blublu=3)
     # First mock job always have id 12
     assert job.job_id == "12"

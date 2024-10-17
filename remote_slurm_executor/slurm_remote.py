@@ -158,7 +158,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         self,
         folder: PurePath | str,
         *,
-        cluster: str,
+        cluster_hostname: str,
         repo_dir_on_cluster: str | PurePosixPath | None = None,
         internet_access_on_compute_nodes: bool = True,
         max_num_timeout: int = 3,
@@ -170,8 +170,8 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         folder = Path(folder)
         assert not folder.is_absolute()
 
-        self.cluster = cluster
-        self.login_node = RemoteV2(self.cluster)
+        self.cluster_hostname = cluster_hostname
+        self.login_node = RemoteV2(self.cluster_hostname)
         self.internet_access_on_compute_nodes = internet_access_on_compute_nodes
         self.I_dont_care_about_reproducibility = I_dont_care_about_reproducibility
 
@@ -352,7 +352,7 @@ git worktree add $WORKTREE_LOCATION $COMMIT_TO_USE \
     def setup_uv(self) -> str:
         if not (uv_path := self._get_uv_path()):
             logger.info(
-                f"Setting up [uv](https://docs.astral.sh/uv/) on {self.cluster}"
+                f"Setting up [uv](https://docs.astral.sh/uv/) on {self.cluster_hostname}"
             )
             self.login_node.run(
                 "curl -LsSf https://astral.sh/uv/install.sh | sh && source ~/.cargo/env"
@@ -360,18 +360,18 @@ git worktree add $WORKTREE_LOCATION $COMMIT_TO_USE \
             uv_path = self._get_uv_path()
             if uv_path is None:
                 raise RuntimeError(
-                    f"Unable to setup `uv` on the {self.cluster} cluster!"
+                    f"Unable to setup `uv` on the {self.cluster_hostname} cluster!"
                 )
         return uv_path
 
     def _get_uv_path(self) -> str | None:
         return (
             LocalV2.get_output(
-                ("ssh", self.cluster, "which", "uv"),
+                ("ssh", self.cluster_hostname, "which", "uv"),
                 warn=True,
             )
             or LocalV2.get_output(
-                ("ssh", self.cluster, "bash", "-l", "which", "uv"),
+                ("ssh", self.cluster_hostname, "bash", "-l", "which", "uv"),
                 warn=True,
             )
             or None
@@ -409,7 +409,7 @@ git worktree add $WORKTREE_LOCATION $COMMIT_TO_USE \
         tasks_ids = list(range(self._num_tasks()))
 
         job = self.job_class(
-            cluster=self.cluster,
+            cluster=self.cluster_hostname,
             folder=self.local_folder,
             job_id=job_id,
             tasks=tasks_ids,
@@ -457,7 +457,7 @@ git worktree add $WORKTREE_LOCATION $COMMIT_TO_USE \
         # scheduled as arrays.
         array_ex = type(self)(
             folder=self._original_folder,
-            cluster=self.cluster,
+            cluster_hostname=self.cluster_hostname,
             repo_dir_on_cluster=self.repo_dir_on_cluster,
             internet_access_on_compute_nodes=self.internet_access_on_compute_nodes,
             max_num_timeout=self.max_num_timeout,
@@ -474,7 +474,7 @@ git worktree add $WORKTREE_LOCATION $COMMIT_TO_USE \
         tasks_ids = list(range(first_job.num_tasks))
         jobs: tp.List[core.Job[tp.Any]] = [
             RemoteSlurmJob(
-                cluster=self.cluster,
+                cluster=self.cluster_hostname,
                 folder=self.folder,
                 job_id=f"{first_job.job_id}_{a}",
                 tasks=tasks_ids,
@@ -511,7 +511,7 @@ git worktree add $WORKTREE_LOCATION $COMMIT_TO_USE \
     def _make_submission_command(self, submission_file_path: PurePath) -> tp.List[str]:
         return [
             "ssh",
-            self.cluster,
+            self.cluster_hostname,
             "cd",
             "$SCRATCH",
             "&&",

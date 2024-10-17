@@ -36,7 +36,7 @@ def test_autoexecutor(cluster: str):
     )
     assert isinstance(executor._executor, remote_slurm_executor.RemoteSlurmExecutor)
     assert executor._executor.folder == PosixPath(folder)
-    assert executor._executor.cluster == cluster
+    assert executor._executor.cluster_hostname == cluster
     assert (
         executor._executor.I_dont_care_about_reproducibility
         == dont_care_about_reproducibility
@@ -47,7 +47,7 @@ def test_autoexecutor(cluster: str):
 def executor(cluster: str):
     executor = remote_slurm_executor.RemoteSlurmExecutor(
         folder=f"logs/{cluster}/%j",  # todo: perhaps we can rename this folder?
-        cluster=cluster,
+        cluster_hostname=cluster,
         I_dont_care_about_reproducibility=True,
     )
 
