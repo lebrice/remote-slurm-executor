@@ -209,7 +209,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         assert python is None, "TODO: Can't use something else than uv for now."
         self._uv_path: str = self.setup_uv()
         _python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
-        python = f"uv run --python={_python_version} python"
+        python = f"{self._uv_path} run --python={_python_version} python"
 
         if not self.remote_dir_mount.is_mounted():
             self.remote_dir_mount.mount()
