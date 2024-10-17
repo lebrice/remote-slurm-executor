@@ -16,10 +16,9 @@ from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath
 from typing import ClassVar
 
-from milatools.utils.compute_node import ComputeNode
 from milatools.utils.local_v2 import LocalV2
 from milatools.utils.remote_v2 import RemoteV2
-from submitit.core import core, job_environment, utils
+from submitit.core import core, utils
 from submitit.slurm import slurm
 from submitit.slurm.slurm import SlurmInfoWatcher, SlurmJobEnvironment
 
@@ -35,20 +34,14 @@ class RemoteDir:
     def mount(self):
         self.login_node.run(f"mkdir -p {self.remote_dir}")
         self.local_dir.mkdir(exist_ok=True, parents=True)
-        try:
-            LocalV2.run(
-                (
-                    "sshfs",
-                    f"{self.login_node.hostname}:{self.remote_dir}",
-                    str(self.local_dir),
-                ),
-                display=True,
-            )
-        except subprocess.CalledProcessError as e:
-            if "fusermount3" in e.stderr:
-                pass  # All good, it's already mounted.
-            else:
-                raise
+        LocalV2.run(
+            (
+                "sshfs",
+                f"{self.login_node.hostname}:{self.remote_dir}",
+                str(self.local_dir),
+            ),
+            display=True,
+        )
 
         logger.info(
             f"Remote dir {self.login_node.hostname}:{self.remote_dir} is now mounted at {self.local_dir}"
@@ -59,9 +52,22 @@ class RemoteDir:
 
     @contextmanager
     def context(self):
-        self.mount()
+        if not self.is_mounted():
+            self.mount()
         yield
         self.unmount()
+
+    def is_mounted(self) -> bool:
+        # Check mounted filesystems using the 'mount' command
+        output = LocalV2.get_output("mount")
+        # Search for the specific mount point in the output
+        if any(
+            f"{self.login_node.hostname}:{self.remote_dir} on {self.local_dir.absolute()} type fuse.sshfs"
+            in line
+            for line in output.splitlines()
+        ):
+            return True
+        return False
 
 
 class RemoteSlurmInfoWatcher(SlurmInfoWatcher):
@@ -128,87 +134,6 @@ class RemoteSlurmJob(core.Job[core.R]):
         )
 
 
-class RemoteSlurmParseException(Exception):
-    pass
-
-
-def _expand_id_suffix(suffix_parts: str) -> tp.List[str]:
-    """Parse the a suffix formatted like "1-3,5,8" into
-    the list of numeric values 1,2,3,5,8.
-    """
-    suffixes = []
-    for suffix_part in suffix_parts.split(","):
-        if "-" in suffix_part:
-            low, high = suffix_part.split("-")
-            int_length = len(low)
-            for num in range(int(low), int(high) + 1):
-                suffixes.append(f"{num:0{int_length}}")
-        else:
-            suffixes.append(suffix_part)
-    return suffixes
-
-
-class RemoteSlurmJobEnvironment(job_environment.JobEnvironment):
-    _env = {
-        "job_id": "SLURM_JOB_ID",
-        "num_tasks": "SLURM_NTASKS",
-        "num_nodes": "SLURM_JOB_NUM_NODES",
-        "node": "SLURM_NODEID",
-        "nodes": "SLURM_JOB_NODELIST",
-        "global_rank": "SLURM_PROCID",
-        "local_rank": "SLURM_LOCALID",
-        "array_job_id": "SLURM_ARRAY_JOB_ID",
-        "array_task_id": "SLURM_ARRAY_TASK_ID",
-    }
-
-    def __init__(
-        self, cluster_hostname: str | None = None, job_id: str | None = None
-    ) -> None:
-        super().__init__()
-        self.cluster = self.name()
-        self.cluster_hostname = cluster_hostname
-
-        self._login_node = None
-        self._compute_node = None
-
-    @property
-    def login_node(self) -> RemoteV2:
-        if self._login_node is None:
-            assert self.cluster_hostname
-            self._login_node = RemoteV2(self.cluster_hostname)
-        return self._login_node
-
-    @property
-    def compute_node(self) -> ComputeNode:
-        if self._compute_node is None:
-            assert self.login_node
-            assert self.job_id
-            self._compute_node = ComputeNode(self.login_node, int(self.job_id))
-        return self._compute_node
-
-    def _requeue(self, countdown: int) -> None:
-        jid = self.job_id
-        self.login_node.run(f"scontrol requeue {jid}")  # timeout=60)
-        logger.info(f"Requeued job {jid} ({countdown} remaining timeouts)")
-
-    @property
-    def hostnames(self) -> list[str]:
-        """Parse the content of the "SLURM_JOB_NODELIST" environment variable,
-        which gives access to the list of hostnames that are part of the current job.
-
-        In SLURM, the node list is formatted NODE_GROUP_1,NODE_GROUP_2,...,NODE_GROUP_N
-        where each node group is formatted as: PREFIX[1-3,5,8] to define the hosts:
-        [PREFIX1, PREFIX2, PREFIX3, PREFIX5, PREFIX8].
-
-        Link: https://hpcc.umd.edu/hpcc/help/slurmenv.html
-        """
-        node_list = self.compute_node.get_output(f"echo {self._env['nodes']}")
-        if not node_list:
-            # return [self.hostname]
-            raise NotImplementedError("TODO: what is this case meant to represent?")
-        return slurm._parse_node_list(node_list)
-
-
 class RemoteSlurmExecutor(slurm.SlurmExecutor):
     """Executor for a remote SLURM cluster.
 
@@ -231,6 +156,13 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
     ) -> None:
         self._original_folder = folder  # save this argument that we'll modify.
 
+        # Example: `folder="logs_test/%j"`
+
+        # Locally:
+        # ./logs_test/mila/%j
+        # Remote:
+        # $SCRATCH/.submitit/logs_test/%j
+
         self.cluster = cluster
         self.repo_dir = PurePosixPath(repo_dir_on_cluster)
         self.internet_access_on_compute_nodes = internet_access_on_compute_nodes
@@ -240,22 +172,15 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         assert not folder.is_absolute()
         self.login_node = RemoteV2(self.cluster)
 
-        self._uv_path: str | None = None
-
+        # "base" folder := dir without any %j %t, %A, etc.
         base_folder = get_first_id_independent_folder(folder)
         rest_of_folder = folder.relative_to(base_folder)
-        # Example: `folder="logs_test/%j"`
 
-        # Locally:
-        # ./logs_test/mila/%j
-        # Remote:
-        # $SCRATCH/.submitit/logs_test/%j
-
-        # "base" folder := dir without any %j %t, %A, etc.
-        self.local_base_folder = Path(base_folder / cluster)
+        self.local_base_folder = Path(base_folder)
         self.local_folder = self.local_base_folder / rest_of_folder
 
-        # todo: include our hostname / something unique so we don't overwrite anything on the remote?
+        # todo: include our hostname / something unique so we don't overwrite anything on the
+        # remote?
         self.remote_base_folder = (
             PurePosixPath(self.login_node.get_output("echo $SCRATCH"))
             / ".submitit"
@@ -268,16 +193,18 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             remote_dir=self.remote_base_folder,
             local_dir=self.local_base_folder,
         )
-        self.remote_dir_mount.mount()
 
         assert python is None, "TODO: Can't use something else than uv for now."
-        self._uv_path: str = self._setup_uv()
-        python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
-        python = f"{self._uv_path} run --python={python_version} python"
+        self._uv_path: str = self.setup_uv()
+        _python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+        python = f"{self._uv_path} run --python={_python_version} python"
+        if not self.remote_dir_mount.is_mounted():
+            self.remote_dir_mount.mount()
 
         super().__init__(
             folder=self.local_folder, max_num_timeout=max_num_timeout, python=python
         )
+
         # No need to make it absolute. Revert it back to a relative path?
         assert not self.local_folder.is_absolute()
         assert self.folder == self.local_folder.absolute(), (
@@ -287,21 +214,26 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         self.folder = self.local_folder
 
         self.sync_source_code()
-
-        if not self.internet_access_on_compute_nodes:
-            logger.info("Syncing the dependencies on the login node.")
-            self.login_node.run(
-                f"cd {self.repo_dir} && {self._uv_path} sync --all-extras"
-            )
+        self.sync_dependencies()
 
         # chdir to the repo so that `uv run` uses the dependencies, etc.
         self.update_parameters(
             srun_args=[f"--chdir={self.repo_dir}"], stderr_to_stdout=True
         )
 
+    def sync_dependencies(self):
+        # if not self.internet_access_on_compute_nodes:
+        #     logger.info("Syncing the dependencies on the login node.")
+        self.login_node.run(f"cd {self.repo_dir} && {self._uv_path} sync --all-extras")
+        # IDEA: IF there is internet access on the compute nodes, then perhaps we could sync the
+        # dependencies on a compute node?
+
     def sync_source_code(self):
-        # TODOS:
-        # - Sync the source code using git?
+        # IDEA: Could also mount a folder with sshfs and then use a
+        # `git clone . /path/to/mount/source` to sync the source code.
+        #  + the job can't break because of a change in the source code.
+        #  - Not as good for reproducibility: not forcing the user to commit and push the code..
+
         if not self.I_dont_care_about_reproducibility:
             if LocalV2.get_output("git status --porcelain"):
                 print(
@@ -309,36 +241,33 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
                     file=sys.stderr,
                 )
                 exit()
-
             LocalV2.run("git push")
 
-        current_commit = LocalV2.get_output("git rev-parse HEAD")
         current_branch = LocalV2.get_output("git rev-parse --abbrev-ref HEAD")
+        current_commit = LocalV2.get_output("git rev-parse HEAD")
+        repo_url = LocalV2.get_output("git config --get remote.origin.url")
 
         # If the repo doesn't exist on the remote, clone it:
         if self.login_node.run(
             f"test -d {self.repo_dir}", warn=True, hide=True
         ).returncode:
-            # https://stackoverflow.com/questions/4089430/how-to-determine-the-url-that-a-local-git-repository-was-originally-cloned-from
-            remote_url = LocalV2.get_output("git config --get remote.origin.url")
-            # https://stackoverflow.com/a/9753364/6388696
-            # current_remote = LocalV2.get_output(
-            #     "git rev-parse --abbrev-ref --symbolic-full-name @{u}"
-            # )
             self.login_node.run(
-                f"git clone {remote_url} -b {current_branch} {self.repo_dir}"
+                f"git clone {repo_url} -b {current_branch} {self.repo_dir}"
             )
-        assert not self.I_dont_care_about_reproducibility
         self.login_node.run(
-            f"cd {self.repo_dir} && git fetch && git checkout {current_branch} && git checkout {current_commit}"
+            f"cd {self.repo_dir} && git fetch && git checkout {current_branch} && git pull"
         )
+        if not self.I_dont_care_about_reproducibility:
+            self.login_node.run(f"cd {self.repo_dir} && git checkout {current_commit}")
 
-    def _setup_uv(self) -> str:
+    def setup_uv(self) -> str:
         if not (uv_path := self._get_uv_path()):
             logger.info(
                 f"Setting up [uv](https://docs.astral.sh/uv/) on {self.cluster}"
             )
-            self.login_node.run("curl -LsSf https://astral.sh/uv/install.sh | sh")
+            self.login_node.run(
+                "curl -LsSf https://astral.sh/uv/install.sh | sh && source ~/.cargo/env"
+            )
             uv_path = self._get_uv_path()
             if uv_path is None:
                 raise RuntimeError(
@@ -349,8 +278,13 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
     def _get_uv_path(self) -> str | None:
         return (
             LocalV2.get_output(
-                ("ssh", self.cluster, "bash", "-l", "which", "uv"), warn=True
-            ).strip()
+                ("ssh", self.cluster, "which", "uv"),
+                warn=True,
+            )
+            or LocalV2.get_output(
+                ("ssh", self.cluster, "bash", "-l", "which", "uv"),
+                warn=True,
+            )
             or None
         )
 

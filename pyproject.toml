@@ -4,10 +4,14 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["milatools>=0.1.5", "setuptools>=75.2.0", "submitit>=1.5.2"]
+dependencies = [
+    "milatools>=0.1.5",
+    "setuptools>=75.2.0",
+    "submitit>=1.5.2",
+]
 
 [project.entry-points."submitit"]
-executor = "remote_slurm_launcher:RemoteSlurmExecutor"
+executor = "remote_slurm_executor:RemoteSlurmExecutor"
 
 [tool.uv]
 dev-dependencies = ["pytest>=8.3.3"]

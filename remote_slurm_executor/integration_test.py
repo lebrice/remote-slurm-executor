@@ -1,4 +1,5 @@
 import logging
+from pathlib import PosixPath, PurePosixPath
 
 import pytest
 import rich.logging
@@ -16,21 +17,46 @@ def add(a, b):
     return a + b
 
 
-@pytest.fixture()
-def executor():
+@pytest.fixture(params=["mila", "cedar", "narval"])
+def cluster(request: pytest.FixtureRequest) -> str:
+    return getattr(request, "param", "mila")
+
+
+def test_autoexecutor(cluster: str):
+    folder = f"logs/{cluster}/%j"
+    repo_dir_on_cluster = "repos/remote-submitit-launcher"
+    dont_care_about_reproducibility = True
     executor = submitit.AutoExecutor(
-        folder="logs/%j",  # todo: perhaps we can rename this folder?
+        folder=folder,  # todo: perhaps we can rename this folder?
         cluster="remoteslurm",
-        remoteslurm_cluster="mila",
-        remoteslurm_repo_dir_on_cluster="repos/remote-submitit-launcher",
-        # remoteslurm_I_dont_care_about_reproducibility=False,
+        remoteslurm_cluster=cluster,
+        remoteslurm_repo_dir_on_cluster=repo_dir_on_cluster,
+        remoteslurm_I_dont_care_about_reproducibility=dont_care_about_reproducibility,
     )
     assert isinstance(executor._executor, remote_slurm_executor.RemoteSlurmExecutor)
+    assert executor._executor.folder == PosixPath(folder)
+    assert executor._executor.cluster == cluster
+    assert executor._executor.repo_dir == PurePosixPath(repo_dir_on_cluster)
+    assert (
+        executor._executor.I_dont_care_about_reproducibility
+        == dont_care_about_reproducibility
+    )
+
+
+@pytest.fixture()
+def executor(cluster: str):
+
+    executor = remote_slurm_executor.RemoteSlurmExecutor(
+        folder="logs/%j",  # todo: perhaps we can rename this folder?
+        cluster=cluster,
+        repo_dir_on_cluster="repos/remote-submitit-launcher",
+        I_dont_care_about_reproducibility=True,
+    )
     try:
         yield executor
     finally:
-        assert executor._executor.remote_dir_mount
-        executor._executor.remote_dir_mount.unmount()
+        assert executor.remote_dir_mount
+        executor.remote_dir_mount.unmount()
 
 
 def test_add(executor: remote_slurm_executor.RemoteSlurmExecutor):
