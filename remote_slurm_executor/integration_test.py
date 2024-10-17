@@ -58,7 +58,8 @@ def executor(cluster: str):
         yield executor
     finally:
         pass
-        # assert executor.remote_dir_mount
+        assert executor.remote_dir_mount
+        # Comment / uncomment to keep the mount after the test to inspect results.
         # executor.remote_dir_mount.unmount()
 
 

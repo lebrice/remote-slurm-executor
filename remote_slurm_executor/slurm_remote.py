@@ -209,7 +209,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         assert python is None, "TODO: Can't use something else than uv for now."
         self._uv_path: str = self.setup_uv()
         _python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
-        python = f"{self._uv_path} run --python={_python_version} python"
+        python = f"uv run --python={_python_version} python"
 
         if not self.remote_dir_mount.is_mounted():
             self.remote_dir_mount.mount()
@@ -230,8 +230,34 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         self.sync_dependencies()
 
         # chdir to the repo so that `uv run` uses the dependencies, etc.
+        current_commit = LocalV2.get_output("git rev-parse HEAD")
+
         self.update_parameters(
-            srun_args=[f"--chdir={self.repo_dir_on_cluster}"], stderr_to_stdout=True
+            stderr_to_stdout=True,
+            setup=[
+                f"""
+set -e
+
+## INPUTS
+REPO_DIR={self.repo_dir_on_cluster}
+COMMIT_TO_USE={current_commit}
+##
+cd $REPO_DIR
+git fetch
+git checkout $COMMIT_TO_USE
+current_branch=`git rev-parse --abbrev-ref HEAD`
+# current_commit=`git rev-parse HEAD`
+repo_name=`basename $REPO_DIR`
+
+mkdir -p $HOME/worktrees
+WORKTREE_LOCATION="$HOME/worktrees/$repo_name-$COMMIT_TO_USE"
+
+# IDK what this "--lock" thing does, kinda hoping that it prevents users from modifying the code.
+git worktree add $WORKTREE_LOCATION $COMMIT_TO_USE \
+    --lock --reason "Please don't modify the code here. This is locked for reproducibility."
+"""
+            ],
+            srun_args=["--chdir=$WORKTREE_LOCATION"],
         )
 
     def submit(
@@ -390,13 +416,15 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         )
         # Equivalent of `_move_temporarity_file` call (expanded to be more explicit):
         # job.paths.move_temporary_file(
-        #     local_submission_file_path, "submission_file", keep_as_symlink=True
+        #     local_submission_file_path, "submission_file", keep_as_symlink=False
         # )
+
         # Local submission file.
         job.paths.submission_file.parent.mkdir(parents=True, exist_ok=True)
         local_submission_file_path.rename(job.paths.submission_file)
-        # Might not work!
-        local_submission_file_path.symlink_to(job.paths.submission_file)
+        # local_submission_file_path.symlink_to(job.paths.submission_file)
+
+        # local_submitted_pickle = .symlink_to(job.paths.submitted_pickle)
         # TODO: The rest here isn't used?
         self._write_job_id(job.job_id, tmp_uuid)
         self._set_job_permissions(job.paths.folder)
@@ -467,7 +495,13 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         content_with_remote_paths = content_with_local_paths.replace(
             str(self.local_base_folder.absolute()), str(self.remote_base_folder)
         )
-        return content_with_remote_paths
+
+        # Note: annoying, but seems like `srun_args` is fed through shlex.quote or
+        # something, which causes issues with the evaluation of variables.
+        chdir_to_worktree = "--chdir=$WORKTREE_LOCATION"
+        return content_with_remote_paths.replace(
+            f"'{chdir_to_worktree}'", chdir_to_worktree
+        )
 
     def _num_tasks(self) -> int:
         nodes: int = self.parameters.get("nodes", 1)
