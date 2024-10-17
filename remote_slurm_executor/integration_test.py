@@ -47,7 +47,7 @@ def test_autoexecutor(cluster: str):
 def executor(cluster: str):
 
     executor = remote_slurm_executor.RemoteSlurmExecutor(
-        folder="logs/%j",  # todo: perhaps we can rename this folder?
+        folder=f"logs/{cluster}/%j",  # todo: perhaps we can rename this folder?
         cluster=cluster,
         repo_dir_on_cluster="repos/remote-submitit-launcher",
         I_dont_care_about_reproducibility=True,
