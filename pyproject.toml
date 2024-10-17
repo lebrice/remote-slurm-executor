@@ -10,8 +10,14 @@ dependencies = [
     "submitit>=1.5.2",
 ]
 
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+
 [project.entry-points."submitit"]
 executor = "remote_slurm_executor:RemoteSlurmExecutor"
 
 [tool.uv]
 dev-dependencies = ["pytest>=8.3.3"]
+package = true

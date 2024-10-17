@@ -3,6 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 #
+import functools
 import itertools
 import logging
 import shlex
@@ -10,17 +11,27 @@ import subprocess
 import sys
 import typing as tp
 import uuid
-import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath
-from typing import ClassVar
+from typing import (
+    Any,
+    Callable,
+    ClassVar,
+    Iterable,
+    ParamSpec,
+    TypeVar,
+    overload,
+)
 
 from milatools.utils.local_v2 import LocalV2
 from milatools.utils.remote_v2 import RemoteV2
 from submitit.core import core, utils
 from submitit.slurm import slurm
 from submitit.slurm.slurm import SlurmInfoWatcher, SlurmJobEnvironment
+
+OutT = TypeVar("OutT", covariant=True)
+P = ParamSpec("P")
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +159,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         folder: PurePath | str,
         *,
         cluster: str,
-        repo_dir_on_cluster: str | PurePosixPath,
+        repo_dir_on_cluster: str | PurePosixPath | None = None,
         internet_access_on_compute_nodes: bool = True,
         max_num_timeout: int = 3,
         python: str | None = None,
@@ -156,21 +167,21 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
     ) -> None:
         self._original_folder = folder  # save this argument that we'll modify.
 
-        # Example: `folder="logs_test/%j"`
-
-        # Locally:
-        # ./logs_test/mila/%j
-        # Remote:
-        # $SCRATCH/.submitit/logs_test/%j
+        folder = Path(folder)
+        assert not folder.is_absolute()
 
         self.cluster = cluster
-        self.repo_dir = PurePosixPath(repo_dir_on_cluster)
+        self.login_node = RemoteV2(self.cluster)
         self.internet_access_on_compute_nodes = internet_access_on_compute_nodes
         self.I_dont_care_about_reproducibility = I_dont_care_about_reproducibility
 
-        folder = Path(folder)
-        assert not folder.is_absolute()
-        self.login_node = RemoteV2(self.cluster)
+        self.repo_dir_on_cluster = PurePosixPath(
+            repo_dir_on_cluster or (PurePosixPath("repos") / current_repo_name())
+        )
+        if not self.repo_dir_on_cluster.is_absolute():
+            self.repo_dir_on_cluster = (
+                self.login_node.get_output("echo $HOME") / self.repo_dir_on_cluster
+            )
 
         # "base" folder := dir without any %j %t, %A, etc.
         base_folder = get_first_id_independent_folder(folder)
@@ -181,6 +192,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
         # todo: include our hostname / something unique so we don't overwrite anything on the
         # remote?
+        # This is the folder where we store the pickle files on the remote.
         self.remote_base_folder = (
             PurePosixPath(self.login_node.get_output("echo $SCRATCH"))
             / ".submitit"
@@ -198,6 +210,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         self._uv_path: str = self.setup_uv()
         _python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
         python = f"{self._uv_path} run --python={_python_version} python"
+
         if not self.remote_dir_mount.is_mounted():
             self.remote_dir_mount.mount()
 
@@ -218,13 +231,59 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
         # chdir to the repo so that `uv run` uses the dependencies, etc.
         self.update_parameters(
-            srun_args=[f"--chdir={self.repo_dir}"], stderr_to_stdout=True
+            srun_args=[f"--chdir={self.repo_dir_on_cluster}"], stderr_to_stdout=True
         )
+
+    def submit(
+        self, fn: Callable[P, OutT], *args: P.args, **kwargs: P.kwargs
+    ) -> core.Job[OutT]:
+        return super().submit(fn, *args, **kwargs)
+
+    A = TypeVar("A")
+    B = TypeVar("B")
+    C = TypeVar("C")
+
+    @overload
+    def map_array(
+        self,
+        fn: Callable[[A], OutT],
+        _a: Iterable[A],
+        /,
+    ) -> list[core.Job[OutT]]:
+        ...
+
+    @overload
+    def map_array(
+        self,
+        fn: Callable[[A, B], OutT],
+        _a: Iterable[A],
+        _b: Iterable[B],
+        /,
+    ) -> list[core.Job[OutT]]:
+        ...
+
+    @overload
+    def map_array(
+        self,
+        fn: Callable[[A, B, C], OutT],
+        _a: Iterable[A],
+        _b: Iterable[B],
+        _c: Iterable[C],
+        /,
+    ) -> list[core.Job[OutT]]:
+        ...
+
+    def map_array(
+        self, fn: Callable[..., OutT], *iterable: Iterable[Any]
+    ) -> list[core.Job[OutT]]:
+        return super().map_array(fn, *iterable)
 
     def sync_dependencies(self):
         # if not self.internet_access_on_compute_nodes:
         #     logger.info("Syncing the dependencies on the login node.")
-        self.login_node.run(f"cd {self.repo_dir} && {self._uv_path} sync --all-extras")
+        self.login_node.run(
+            f"cd {self.repo_dir_on_cluster} && {self._uv_path} sync --all-extras"
+        )
         # IDEA: IF there is internet access on the compute nodes, then perhaps we could sync the
         # dependencies on a compute node?
 
@@ -236,11 +295,10 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
         if not self.I_dont_care_about_reproducibility:
             if LocalV2.get_output("git status --porcelain"):
-                print(
+                raise RuntimeError(
                     "You have uncommitted changes, please commit and push them before trying again.",
-                    file=sys.stderr,
                 )
-                exit()
+                # exit(1)
             LocalV2.run("git push")
 
         current_branch = LocalV2.get_output("git rev-parse --abbrev-ref HEAD")
@@ -249,16 +307,21 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
         # If the repo doesn't exist on the remote, clone it:
         if self.login_node.run(
-            f"test -d {self.repo_dir}", warn=True, hide=True
+            f"test -d {self.repo_dir_on_cluster}",
+            warn=True,
+            hide=True,
+            display=False,
         ).returncode:
             self.login_node.run(
-                f"git clone {repo_url} -b {current_branch} {self.repo_dir}"
+                f"git clone {repo_url} -b {current_branch} {self.repo_dir_on_cluster}"
             )
         self.login_node.run(
-            f"cd {self.repo_dir} && git fetch && git checkout {current_branch} && git pull"
+            f"cd {self.repo_dir_on_cluster} && git fetch && git checkout {current_branch} && git pull"
         )
         if not self.I_dont_care_about_reproducibility:
-            self.login_node.run(f"cd {self.repo_dir} && git checkout {current_commit}")
+            self.login_node.run(
+                f"cd {self.repo_dir_on_cluster} && git checkout {current_commit}"
+            )
 
     def setup_uv(self) -> str:
         if not (uv_path := self._get_uv_path()):
@@ -359,13 +422,19 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             d.dump(pickle_path)
             pickle_paths.append(pickle_path)
         n = len(delayed_submissions)
+
+        # NOTE: I don't yet understand this part here. Seems like poor design to me.
+
         # Make a copy of the executor, since we don't want other jobs to be
         # scheduled as arrays.
         array_ex = type(self)(
-            cluster=self.cluster,
-            repo_dir=self.repo_dir,
             folder=self._original_folder,
+            cluster=self.cluster,
+            repo_dir_on_cluster=self.repo_dir_on_cluster,
+            internet_access_on_compute_nodes=self.internet_access_on_compute_nodes,
             max_num_timeout=self.max_num_timeout,
+            python=None,
+            I_dont_care_about_reproducibility=self.I_dont_care_about_reproducibility,
         )
         array_ex.update_parameters(**self.parameters)
         array_ex.parameters["map_count"] = n
@@ -389,14 +458,16 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         return jobs
 
     def _make_submission_file_text(self, command: str, uid: str) -> str:
-        # todo: there might still be issues with absolute paths with this folder here!
-        return _make_sbatch_string(
-            command=command, folder=self.remote_folder, **self.parameters
-        )
-        # content_with_remote_paths = content_with_local_paths.replace(
-        #     str(self.local_base_folder.absolute()), str(self.remote_base_folder)
+        # return _make_sbatch_string(
+        #     command=command, folder=self.remote_folder, **self.parameters
         # )
-        # return content_with_remote_paths
+        content_with_local_paths = slurm._make_sbatch_string(
+            command=command, folder=self.local_folder, **self.parameters
+        )
+        content_with_remote_paths = content_with_local_paths.replace(
+            str(self.local_base_folder.absolute()), str(self.remote_base_folder)
+        )
+        return content_with_remote_paths
 
     def _num_tasks(self) -> int:
         nodes: int = self.parameters.get("nodes", 1)
@@ -404,7 +475,15 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         return nodes * tasks_per_node
 
     def _make_submission_command(self, submission_file_path: PurePath) -> tp.List[str]:
-        return ["ssh", self.cluster, "sbatch", str(submission_file_path)]
+        return [
+            "ssh",
+            self.cluster,
+            "cd",
+            "$SCRATCH",
+            "&&",
+            "sbatch",
+            str(submission_file_path),
+        ]
 
     @classmethod
     def affinity(cls) -> int:
@@ -412,169 +491,39 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # return -1 if shutil.which("srun") is None else 2
 
 
-# pylint: disable=too-many-arguments,unused-argument, too-many-locals
-def _make_sbatch_string(
-    command: str,
-    folder: tp.Union[str, PurePath],
-    job_name: str = "submitit",
-    partition: tp.Optional[str] = None,
-    time: int = 5,
-    nodes: int = 1,
-    ntasks_per_node: tp.Optional[int] = None,
-    cpus_per_task: tp.Optional[int] = None,
-    cpus_per_gpu: tp.Optional[int] = None,
-    num_gpus: tp.Optional[int] = None,  # legacy
-    gpus_per_node: tp.Optional[int] = None,
-    gpus_per_task: tp.Optional[int] = None,
-    qos: tp.Optional[str] = None,  # quality of service
-    setup: tp.Optional[tp.List[str]] = None,
-    mem: tp.Optional[str] = None,
-    mem_per_gpu: tp.Optional[str] = None,
-    mem_per_cpu: tp.Optional[str] = None,
-    signal_delay_s: int = 90,
-    comment: tp.Optional[str] = None,
-    constraint: tp.Optional[str] = None,
-    exclude: tp.Optional[str] = None,
-    account: tp.Optional[str] = None,
-    gres: tp.Optional[str] = None,
-    mail_type: tp.Optional[str] = None,
-    mail_user: tp.Optional[str] = None,
-    nodelist: tp.Optional[str] = None,
-    dependency: tp.Optional[str] = None,
-    exclusive: tp.Optional[tp.Union[bool, str]] = None,
-    array_parallelism: int = 256,
-    wckey: str = "submitit",
-    stderr_to_stdout: bool = False,
-    map_count: tp.Optional[int] = None,  # used internally
-    additional_parameters: tp.Optional[tp.Dict[str, tp.Any]] = None,
-    srun_args: tp.Optional[tp.Iterable[str]] = None,
-    use_srun: bool = True,
-) -> str:
-    """Creates the content of an sbatch file with provided parameters
+def current_repo_name() -> str:
+    repo_url = LocalV2.get_output("git config --get remote.origin.url")
+    return repo_url.split("/")[-1]
 
-    Parameters
-    ----------
-    See slurm sbatch documentation for most parameters:
-    https://slurm.schedmd.com/sbatch.html
 
-    Below are the parameters that differ from slurm documentation:
+@functools.lru_cache
+def get_slurm_account(cluster: str) -> str:
+    """Gets the SLURM account of the user using sacctmgr on the slurm cluster.
 
-    folder: str/Path
-        folder where print logs and error logs will be written
-    signal_delay_s: int
-        delay between the kill signal and the actual kill of the slurm job.
-    setup: list
-        a list of command to run in sbatch before running srun
-    map_size: int
-        number of simultaneous map/array jobs allowed
-    additional_parameters: dict
-        Forces any parameter to a given value in sbatch. This can be useful
-        to add parameters which are not currently available in submitit.
-        Eg: {"mail-user": "blublu@fb.com", "mail-type": "BEGIN"}
-    srun_args: List[str]
-        Add each argument in the list to the srun call
+    When there are multiple accounts, this selects the first account, alphabetically.
 
-    Raises
-    ------
-    ValueError
-        In case an erroneous keyword argument is added, a list of all eligible parameters
-        is printed, with their default values
+    On DRAC cluster, this uses the `def` allocations instead of `rrg`, and when
+    the rest of the accounts are the same up to a '_cpu' or '_gpu' suffix, it uses
+    '_cpu'.
+
+    For example:
+
+    ```text
+    def-someprofessor_cpu  <-- this one is used.
+    def-someprofessor_gpu
+    rrg-someprofessor_cpu
+    rrg-someprofessor_gpu
+    ```
     """
-    nonslurm = [
-        "nonslurm",
-        "folder",
-        "command",
-        "map_count",
-        "array_parallelism",
-        "additional_parameters",
-        "setup",
-        "signal_delay_s",
-        "stderr_to_stdout",
-        "srun_args",
-        "use_srun",  # if False, un python directly in sbatch instead of through srun
-    ]
-    parameters = {
-        k: v for k, v in locals().items() if v is not None and k not in nonslurm
-    }
-    # rename and reformat parameters
-    parameters["signal"] = f"{SlurmJobEnvironment.USR_SIG}@{signal_delay_s}"
-    if num_gpus is not None:
-        warnings.warn(
-            '"num_gpus" is deprecated, please use "gpus_per_node" instead (overwritting with num_gpus)'
-        )
-        parameters["gpus_per_node"] = parameters.pop("num_gpus", 0)
-    if "cpus_per_gpu" in parameters and "gpus_per_task" not in parameters:
-        warnings.warn(
-            '"cpus_per_gpu" requires to set "gpus_per_task" to work (and not "gpus_per_node")'
-        )
-    # add necessary parameters
-
-    # Local paths to read from?
-
-    # Paths to put in the sbatch file
-    # paths = utils.JobPaths(folder=folder)  # changed!
-    stdout = str(PurePosixPath(folder) / "%j_%t_log.out")  # changed!
-    stderr = str(PurePosixPath(folder) / "%j_%t_log.err")  # changed!
-    # Job arrays will write files in the form  <ARRAY_ID>_<ARRAY_TASK_ID>_<TASK_ID>
-    if map_count is not None:
-        assert isinstance(map_count, int) and map_count
-        parameters["array"] = f"0-{map_count - 1}%{min(map_count, array_parallelism)}"
-        stdout = stdout.replace("%j", "%A_%a")
-        stderr = stderr.replace("%j", "%A_%a")
-    parameters["output"] = stdout.replace("%t", "0")
-    if not stderr_to_stdout:
-        parameters["error"] = stderr.replace("%t", "0")
-    parameters["open-mode"] = "append"
-    if additional_parameters is not None:
-        parameters.update(additional_parameters)
-    # now create
-    lines = ["#!/bin/bash", "", "# Parameters"]
-    for k in sorted(parameters):
-        lines.append(_as_sbatch_flag(k, parameters[k]))
-    # environment setup:
-    if setup is not None:
-        lines += ["", "# setup"] + setup
-    # commandline (this will run the function and args specified in the file provided as argument)
-    # We pass --output and --error here, because the SBATCH command doesn't work as expected with a filename pattern
-
-    if use_srun:
-        # using srun has been the only option historically,
-        # but it's not clear anymore if it is necessary, and using it prevents
-        # jobs from scheduling other jobs
-        stderr_flags = [] if stderr_to_stdout else ["--error", stderr]
-        if srun_args is None:
-            srun_args = []
-        srun_cmd = _shlex_join(
-            ["srun", "--unbuffered", "--output", stdout, *stderr_flags, *srun_args]
-        )
-        command = " ".join((srun_cmd, command))
-
-    lines += [
-        "",
-        "# command",
-        "export SUBMITIT_EXECUTOR=slurm",
-        # The input "command" is supposed to be a valid shell command
-        command,
-        "",
-    ]
-    return "\n".join(lines)
-
-
-def _convert_mem(mem_gb: float) -> str:
-    if mem_gb == int(mem_gb):
-        return f"{int(mem_gb)}GB"
-    return f"{int(mem_gb * 1024)}MB"
-
-
-def _as_sbatch_flag(key: str, value: tp.Any) -> str:
-    key = key.replace("_", "-")
-    if value is True:
-        return f"#SBATCH --{key}"
-
-    value = shlex.quote(str(value))
-    return f"#SBATCH --{key}={value}"
-
-
-def _shlex_join(split_command: tp.List[str]) -> str:
-    """Same as shlex.join, but that was only added in Python 3.8"""
-    return " ".join(shlex.quote(arg) for arg in split_command)
+    logger.info(
+        f"Fetching the list of SLURM accounts available on the {cluster} cluster."
+    )
+    result = RemoteV2(cluster).run(
+        "sacctmgr --noheader show associations where user=$USER format=Account%50"
+    )
+    accounts = [line.strip() for line in result.stdout.splitlines()]
+    assert accounts
+    logger.info(f"Accounts on the slurm cluster {cluster}: {accounts}")
+    account = sorted(accounts)[0]
+    logger.info(f"Using account {account} to launch jobs.")
+    return account
