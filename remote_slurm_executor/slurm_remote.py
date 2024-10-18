@@ -3,6 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 #
+import contextlib
 import functools
 import itertools
 import logging
@@ -224,7 +225,10 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # We create a git worktree on the remote, at that particular commit.
         repo_dir_on_cluster = self.remote_home / "repos" / current_repo_name()
         self.worktree_path = self.sync_source_code(repo_dir_on_cluster)
-        self.sync_dependencies(remote_repo_dir=self.worktree_path)
+        # NOTE: Running `uv sync` in the worktrees we create is not a good idea, but we also need to make sure
+        # that all deps have been downloaded on the login node when there isn't internet access on the compute nodes!
+        if not self.internet_access_on_compute_nodes:
+            self.predownload_dependencies()
 
         srun_args: list[str] = self.parameters.setdefault("srun_args", [])
         # chdir to the repo so that `uv run` uses the dependencies, etc at that commit.
@@ -277,15 +281,18 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
     ) -> list[core.Job[OutT]]:
         return super().map_array(fn, *iterable)
 
-    def sync_dependencies(self, remote_repo_dir: PurePosixPath):
-        # if not self.internet_access_on_compute_nodes:
-        #     logger.info("Syncing the dependencies on the login node.")
-
-        self.login_node.run(
-            f"cd {remote_repo_dir} && {self._uv_path} sync --all-extras"
+    def predownload_dependencies(self):
+        logger.info(
+            "Syncing the dependencies on the login node once, so that they are in the cache "
+            "and available for the job later."
         )
+        with self.login_node.chdir(self.worktree_path):
+            self.login_node.run(f"{self._uv_path} sync --all-extras --frozen")
+            # Remove the venv since we just want the dependencies to be downloaded to the cache)
+            self.login_node.run("rm -r .venv")
+
         # IDEA: IF there is internet access on the compute nodes, then perhaps we could sync the
-        # dependencies on a compute node?
+        # dependencies on a compute node instead of on the login nodes?
 
     def sync_source_code(self, repo_dir_on_cluster: PurePosixPath) -> PurePosixPath:
         """Sync the local source code with the remote cluster."""
@@ -563,6 +570,20 @@ class LoginNode(RemoteV2):
             ).returncode
             == 0
         )
+
+    @contextlib.contextmanager
+    def chdir(self, remote_dir: PurePosixPath | str):
+        cd_command = f"cd {remote_dir}"
+        if self.command_prefix:
+            added = f"&& {cd_command}"
+        else:
+            added = cd_command
+
+        self.command_prefix += added
+
+        yield
+
+        self.command_prefix = self.command_prefix.removesuffix(added)
 
     def cd(self, remote_dir: PurePosixPath | str):
         cd_command = f"cd {remote_dir}"

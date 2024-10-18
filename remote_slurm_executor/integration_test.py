@@ -20,7 +20,7 @@ def add(a: T, b: T) -> T:
     return a + b
 
 
-@pytest.fixture(params=["mila"])
+@pytest.fixture(params=["mila", "cedar", "narval"])
 def cluster(request: pytest.FixtureRequest) -> str:
     return getattr(request, "param", "mila")
 
