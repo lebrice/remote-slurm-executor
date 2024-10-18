@@ -27,20 +27,14 @@ def cluster(request: pytest.FixtureRequest) -> str:
 
 def test_autoexecutor(cluster: str):
     folder = f"logs/{cluster}/%j"
-    dont_care_about_reproducibility = True
     executor = submitit.AutoExecutor(
         folder=folder,  # todo: perhaps we can rename this folder?
         cluster="remoteslurm",
         remoteslurm_cluster_hostname=cluster,
-        remoteslurm_I_dont_care_about_reproducibility=dont_care_about_reproducibility,
     )
     assert isinstance(executor._executor, remote_slurm_executor.RemoteSlurmExecutor)
     assert executor._executor.folder == PosixPath(folder)
     assert executor._executor.cluster_hostname == cluster
-    assert (
-        executor._executor.I_dont_care_about_reproducibility
-        == dont_care_about_reproducibility
-    )
 
 
 @pytest.fixture()
