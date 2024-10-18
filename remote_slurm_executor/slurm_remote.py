@@ -225,13 +225,12 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # We create a git worktree on the remote, at that particular commit.
         repo_dir_on_cluster = self.remote_home / "repos" / current_repo_name()
         self.worktree_path = self.sync_source_code(repo_dir_on_cluster)
-        # NOTE: Running `uv sync` in the worktrees we create is not a good idea, but we also need to make sure
-        # that all deps have been downloaded on the login node when there isn't internet access on the compute nodes!
+
         if not self.internet_access_on_compute_nodes:
             self.predownload_dependencies()
 
-        srun_args: list[str] = self.parameters.setdefault("srun_args", [])
         # chdir to the repo so that `uv run` uses the dependencies, etc at that commit.
+        srun_args: list[str] = self.parameters.setdefault("srun_args", [])
         srun_args.append(f"--chdir={self.worktree_path}")
         self.update_parameters(
             stderr_to_stdout=True, srun_args=self.parameters.get("srun_args", [])
