@@ -31,7 +31,7 @@ def test_autoexecutor(cluster: str):
     executor = submitit.AutoExecutor(
         folder=folder,  # todo: perhaps we can rename this folder?
         cluster="remoteslurm",
-        remoteslurm_cluster=cluster,
+        remoteslurm_cluster_hostname=cluster,
         remoteslurm_I_dont_care_about_reproducibility=dont_care_about_reproducibility,
     )
     assert isinstance(executor._executor, remote_slurm_executor.RemoteSlurmExecutor)

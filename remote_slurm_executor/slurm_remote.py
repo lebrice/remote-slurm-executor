@@ -9,6 +9,7 @@ import logging
 import shlex
 import subprocess
 import sys
+import time
 import typing as tp
 import uuid
 from contextlib import contextmanager
@@ -24,11 +25,14 @@ from typing import (
     overload,
 )
 
+import rich
+from milatools.cli.utils import SSH_CONFIG_FILE
 from milatools.utils.local_v2 import LocalV2
 from milatools.utils.remote_v2 import RemoteV2
 from submitit.core import core, utils
 from submitit.slurm import slurm
 from submitit.slurm.slurm import SlurmInfoWatcher, SlurmJobEnvironment
+from typing_extensions import override
 
 OutT = TypeVar("OutT", covariant=True)
 P = ParamSpec("P")
@@ -159,7 +163,6 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         folder: PurePath | str,
         *,
         cluster_hostname: str,
-        repo_dir_on_cluster: str | PurePosixPath | None = None,
         internet_access_on_compute_nodes: bool = True,
         max_num_timeout: int = 3,
         python: str | None = None,
@@ -171,17 +174,15 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         assert not folder.is_absolute()
 
         self.cluster_hostname = cluster_hostname
-        self.login_node = RemoteV2(self.cluster_hostname)
+        self.login_node = LoginNode(self.cluster_hostname)
         self.internet_access_on_compute_nodes = internet_access_on_compute_nodes
         self.I_dont_care_about_reproducibility = I_dont_care_about_reproducibility
 
-        self.repo_dir_on_cluster = PurePosixPath(
-            repo_dir_on_cluster or (PurePosixPath("repos") / current_repo_name())
-        )
-        if not self.repo_dir_on_cluster.is_absolute():
-            self.repo_dir_on_cluster = (
-                self.login_node.get_output("echo $HOME") / self.repo_dir_on_cluster
-            )
+        self.remote_home = PurePosixPath(self.login_node.get_output("echo $HOME"))
+        self.remote_scratch = PurePosixPath(self.login_node.get_output("echo $SCRATCH"))
+        # NOTE: Could allow passing this is, but it could cause trouble, since we'd have to check
+        # that it's in $HOME (or, more precisely, on the same filesystem as the worktrees will be
+        # created, which is currently in $HOME/worktrees
 
         # "base" folder := dir without any %j %t, %A, etc.
         base_folder = get_first_id_independent_folder(folder)
@@ -190,14 +191,8 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         self.local_base_folder = Path(base_folder)
         self.local_folder = self.local_base_folder / rest_of_folder
 
-        # todo: include our hostname / something unique so we don't overwrite anything on the
-        # remote?
         # This is the folder where we store the pickle files on the remote.
-        self.remote_base_folder = (
-            PurePosixPath(self.login_node.get_output("echo $SCRATCH"))
-            / ".submitit"
-            / base_folder
-        )
+        self.remote_base_folder = self.remote_scratch / ".submitit" / base_folder
         self.remote_folder = self.remote_base_folder / rest_of_folder
 
         self.remote_dir_mount: RemoteDir | None = RemoteDir(
@@ -226,38 +221,16 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         )
         self.folder = self.local_folder
 
-        self.sync_source_code()
-        self.sync_dependencies()
+        # We create a git worktree on the remote, at that particular commit.
+        repo_dir_on_cluster = self.remote_home / "repos" / current_repo_name()
+        self.worktree_path = self.sync_source_code(repo_dir_on_cluster)
+        self.sync_dependencies(remote_repo_dir=self.worktree_path)
 
-        # chdir to the repo so that `uv run` uses the dependencies, etc.
-        current_commit = LocalV2.get_output("git rev-parse HEAD")
-
+        srun_args: list[str] = self.parameters.setdefault("srun_args", [])
+        # chdir to the repo so that `uv run` uses the dependencies, etc at that commit.
+        srun_args.append(f"--chdir={self.worktree_path}")
         self.update_parameters(
-            stderr_to_stdout=True,
-            setup=[
-                f"""
-set -e
-
-## INPUTS
-REPO_DIR={self.repo_dir_on_cluster}
-COMMIT_TO_USE={current_commit}
-##
-cd $REPO_DIR
-git fetch
-git checkout $COMMIT_TO_USE
-current_branch=`git rev-parse --abbrev-ref HEAD`
-# current_commit=`git rev-parse HEAD`
-repo_name=`basename $REPO_DIR`
-
-mkdir -p $HOME/worktrees
-WORKTREE_LOCATION="$HOME/worktrees/$repo_name-$COMMIT_TO_USE"
-
-# IDK what this "--lock" thing does, kinda hoping that it prevents users from modifying the code.
-git worktree add $WORKTREE_LOCATION $COMMIT_TO_USE \
-    --lock --reason "Please don't modify the code here. This is locked for reproducibility."
-"""
-            ],
-            srun_args=["--chdir=$WORKTREE_LOCATION"],
+            stderr_to_stdout=True, srun_args=self.parameters.get("srun_args", [])
         )
 
     def submit(
@@ -304,50 +277,61 @@ git worktree add $WORKTREE_LOCATION $COMMIT_TO_USE \
     ) -> list[core.Job[OutT]]:
         return super().map_array(fn, *iterable)
 
-    def sync_dependencies(self):
+    def sync_dependencies(self, remote_repo_dir: PurePosixPath):
         # if not self.internet_access_on_compute_nodes:
         #     logger.info("Syncing the dependencies on the login node.")
+
         self.login_node.run(
-            f"cd {self.repo_dir_on_cluster} && {self._uv_path} sync --all-extras"
+            f"cd {remote_repo_dir} && {self._uv_path} sync --all-extras"
         )
         # IDEA: IF there is internet access on the compute nodes, then perhaps we could sync the
         # dependencies on a compute node?
 
-    def sync_source_code(self):
-        # IDEA: Could also mount a folder with sshfs and then use a
-        # `git clone . /path/to/mount/source` to sync the source code.
-        #  + the job can't break because of a change in the source code.
-        #  - Not as good for reproducibility: not forcing the user to commit and push the code..
+    def sync_source_code(self, repo_dir_on_cluster: PurePosixPath) -> PurePosixPath:
+        """Sync the local source code with the remote cluster."""
 
         if not self.I_dont_care_about_reproducibility:
             if LocalV2.get_output("git status --porcelain"):
-                raise RuntimeError(
-                    "You have uncommitted changes, please commit and push them before trying again.",
+                rich.print(
+                    "You have uncommitted changes, please commit and push them before re-running the command.\n"
+                    "(This is necessary in order to sync local code with the remote cluster, and is also a good "
+                    "practice for reproducibility.)"
                 )
-                # exit(1)
+                exit(1)
+            # Local git repo is clean, push HEAD to the remote.
             LocalV2.run("git push")
 
-        current_branch = LocalV2.get_output("git rev-parse --abbrev-ref HEAD")
+        current_branch_name = LocalV2.get_output("git rev-parse --abbrev-ref HEAD")
         current_commit = LocalV2.get_output("git rev-parse HEAD")
+
+        ref = (
+            current_branch_name
+            if self.I_dont_care_about_reproducibility
+            else current_commit
+        )
+
         repo_url = LocalV2.get_output("git config --get remote.origin.url")
+        repo_name = repo_url.split("/")[-1].removesuffix(".git")
 
         # If the repo doesn't exist on the remote, clone it:
-        if self.login_node.run(
-            f"test -d {self.repo_dir_on_cluster}",
-            warn=True,
-            hide=True,
-            display=False,
-        ).returncode:
+        if not self.login_node.dir_exists(repo_dir_on_cluster):
+            self.login_node.run(f"mkdir -p {repo_dir_on_cluster.parent}")
+            self.login_node.run(f"git clone {repo_url} {repo_dir_on_cluster}")
+        else:
+            # Else, fetch the latest changes:
+            self.login_node.run(f"cd {repo_dir_on_cluster} && git fetch")
+
+        remote_worktree_path = self.remote_home / "worktrees" / f"{repo_name}-{ref}"
+
+        if not self.login_node.dir_exists(remote_worktree_path):
+            self.login_node.run(f"mkdir -p {remote_worktree_path.parent}")
             self.login_node.run(
-                f"git clone {repo_url} -b {current_branch} {self.repo_dir_on_cluster}"
+                f"cd {repo_dir_on_cluster} && git worktree add {remote_worktree_path} {ref}"
+                # IDK what this "--lock" thing does, I'd like it to prevent users from modifying the code.
+                # Could also pass a reason for locking (if locking actually does what we want)
+                # '''--lock --reason "Please don't modify the code here. This is locked for reproducibility."'''
             )
-        self.login_node.run(
-            f"cd {self.repo_dir_on_cluster} && git fetch && git checkout {current_branch} && git pull"
-        )
-        if not self.I_dont_care_about_reproducibility:
-            self.login_node.run(
-                f"cd {self.repo_dir_on_cluster} && git checkout {current_commit}"
-            )
+        return remote_worktree_path
 
     def setup_uv(self) -> str:
         if not (uv_path := self._get_uv_path()):
@@ -437,9 +421,31 @@ git worktree add $WORKTREE_LOCATION $COMMIT_TO_USE \
         logger.debug(delayed_submissions[0])
         if len(delayed_submissions) == 1:
             # TODO: Why is this case here?
-            return super()._internal_process_submissions(delayed_submissions)
+            # NOTE: Expanded (copied) from the base class, just to understand whats going on.
+            eq_dict = self._equivalence_dict()
+            timeout_min = self.parameters.get(
+                eq_dict["timeout_min"] if eq_dict else "timeout_min", 5
+            )
+            jobs = []
+            for delayed in delayed_submissions:
+                tmp_uuid = uuid.uuid4().hex
+                pickle_path = (
+                    utils.JobPaths.get_first_id_independent_folder(self.folder)
+                    / f"{tmp_uuid}.pkl"
+                )
+                pickle_path.parent.mkdir(parents=True, exist_ok=True)
+                delayed.set_timeout(timeout_min, self.max_num_timeout)
+                delayed.dump(pickle_path)
 
-        # array
+                self._throttle()
+                self._last_job_submitted = time.time()
+                job = self._submit_command(self._submitit_command_str)
+                job.paths.move_temporary_file(pickle_path, "submitted_pickle")
+                jobs.append(job)
+            return jobs
+
+        # Job Array
+
         folder = utils.JobPaths.get_first_id_independent_folder(self.folder)
         folder.mkdir(parents=True, exist_ok=True)
         timeout_min = self.parameters.get("time", 5)
@@ -523,6 +529,91 @@ git worktree add $WORKTREE_LOCATION $COMMIT_TO_USE \
     def affinity(cls) -> int:
         return 2
         # return -1 if shutil.which("srun") is None else 2
+
+
+from milatools.utils.remote_v2 import SSH_CONFIG_FILE, Hide, RemoteV2
+
+
+class LoginNode(RemoteV2):
+    # Tiny improvements / changes to the RemoteV2 class from milatools.
+    def __init__(
+        self,
+        hostname: str,
+        *,
+        control_path: Path | None = None,
+        ssh_config_path: Path = SSH_CONFIG_FILE,
+        command_prefix: str = "",
+        _start_control_socket: bool = True,
+    ):
+        super().__init__(
+            hostname,
+            control_path=control_path,
+            ssh_config_path=ssh_config_path,
+            _start_control_socket=_start_control_socket,
+        )
+        self._start_control_socket = _start_control_socket
+        self.command_prefix = command_prefix
+
+    def dir_exists(self, remote_dir: PurePosixPath | str) -> bool:
+        return (
+            self.run(
+                f"test -d {remote_dir}",
+                warn=True,
+                hide=True,
+                display=False,
+            ).returncode
+            == 0
+        )
+
+    def cd(self, remote_dir: PurePosixPath | str):
+        cd_command = f"cd {remote_dir}"
+        if self.command_prefix:
+            new_prefix = f"{self.command_prefix} && {cd_command}"
+        else:
+            new_prefix = cd_command
+        return type(self)(
+            hostname=self.hostname,
+            control_path=self.control_path,
+            ssh_config_path=self.ssh_config_path,
+            _start_control_socket=self._start_control_socket,
+            command_prefix=new_prefix,
+        )
+
+    @override
+    def run(
+        self,
+        command: str,
+        *,
+        input: str | None = None,
+        display: bool = True,
+        warn: bool = False,
+        hide: Hide = False,
+    ):
+        return super().run(
+            self.command_prefix + command,
+            input=input,
+            display=display,
+            warn=warn,
+            hide=hide,
+        )
+
+    @override
+    async def run_async(
+        self,
+        command: str,
+        *,
+        input: str | None = None,
+        display: bool = True,
+        warn: bool = False,
+        hide: Hide = False,
+    ) -> subprocess.CompletedProcess[str]:
+        return await super().run_async(
+            self.command_prefix + command,
+            input=input,
+            display=display,
+            warn=warn,
+            hide=hide,
+        )
 
 
 def current_repo_name() -> str:
