@@ -19,5 +19,8 @@ build-backend = "hatchling.build"
 executor = "remote_slurm_executor:RemoteSlurmExecutor"
 
 [tool.uv]
-dev-dependencies = ["pytest>=8.3.3"]
+dev-dependencies = [
+    "pytest-skip-slow>=0.0.5",
+    "pytest>=8.3.3",
+]
 package = true

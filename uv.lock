@@ -378,6 +378,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pytest-skip-slow"
+version = "0.0.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7e/cf/507ddfc0f43492bf1cd3fd192fab672de62a381d85a7c8fcd55e5364dd7d/pytest-skip-slow-0.0.5.tar.gz", hash = "sha256:655ea5c748c72947e0d302334e7fa8ef99929257a2a2bc928f630ddb5a161d88", size = 1473 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1d/43/76edc0738298170fef6e2a9315ef96ed0d5c77de381b2ec1b54d43838a91/pytest_skip_slow-0.0.5-py3-none-any.whl", hash = "sha256:e2f6401d6ed0db3be1402622a7b24f7df14f61ebd26feda808a0d45433d4d474", size = 2959 },
+]
+
+[[package]]
 name = "questionary"
 version = "1.10.0"
 source = { registry = "https://pypi.org/simple" }
@@ -402,6 +414,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
+    { name = "pytest-skip-slow" },
 ]
 
 [package.metadata]
@@ -412,7 +425,10 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=8.3.3" }]
+dev = [
+    { name = "pytest", specifier = ">=8.3.3" },
+    { name = "pytest-skip-slow", specifier = ">=0.0.5" },
+]
 
 [[package]]
 name = "rich"
