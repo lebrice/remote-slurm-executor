@@ -464,7 +464,6 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         array_ex = type(self)(
             folder=self._original_folder,
             cluster_hostname=self.cluster_hostname,
-            repo_dir_on_cluster=self.repo_dir_on_cluster,
             internet_access_on_compute_nodes=self.internet_access_on_compute_nodes,
             max_num_timeout=self.max_num_timeout,
             python=None,
