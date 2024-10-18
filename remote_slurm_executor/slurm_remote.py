@@ -27,6 +27,7 @@ from typing import (
 )
 
 import rich
+from milatools.cli import console
 from milatools.cli.utils import SSH_CONFIG_FILE
 from milatools.utils.local_v2 import LocalV2
 from milatools.utils.remote_v2 import RemoteV2
@@ -598,6 +599,13 @@ class LoginNode(RemoteV2):
             command_prefix=new_prefix,
         )
 
+    def display(self, command: str, input: str | None = None, _stack_offset: int = 3):
+        message = f"({self.hostname}) $ {command}"
+        if input:
+            message += f"\n{input}"
+
+        console.log(message, style="green", _stack_offset=_stack_offset)
+
     @override
     def run(
         self,
@@ -608,6 +616,8 @@ class LoginNode(RemoteV2):
         warn: bool = False,
         hide: Hide = False,
     ):
+        if display:
+            self.display(command, input=input, _stack_offset=3)
         return super().run(
             self.command_prefix + command,
             input=input,
@@ -626,10 +636,12 @@ class LoginNode(RemoteV2):
         warn: bool = False,
         hide: Hide = False,
     ) -> subprocess.CompletedProcess[str]:
+        if display:
+            self.display(command, input=input, _stack_offset=3)
         return await super().run_async(
             self.command_prefix + command,
             input=input,
-            display=display,
+            display=False,
             warn=warn,
             hide=hide,
         )
