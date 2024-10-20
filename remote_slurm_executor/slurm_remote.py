@@ -59,8 +59,10 @@ class RemoteDirSync:
         # to create a new folder in it, e.g. logs/mila --> logs/mila/mila
         self.login_node.run(f"mkdir -p {self.remote_dir}")
         self.local_dir.mkdir(exist_ok=True, parents=True)
+        assert self.local_dir.name == self.remote_dir.name
         self.login_node.local_runner.run(
-            f"rsync --recursive --links --safe-links --update {self.local_dir} {self.login_node.hostname}:{self.remote_dir.parent}"
+            f"rsync --recursive --links --safe-links --update "
+            f"{self.local_dir} {self.login_node.hostname}:{self.remote_dir.parent}"
         )
         logger.info(
             f"Local dir {self.local_dir} was copied to {self.remote_dir} on the "
@@ -69,8 +71,10 @@ class RemoteDirSync:
 
     def sync_from_remote(self):
         self.local_dir.mkdir(exist_ok=True, parents=True)
+        assert self.local_dir.name == self.remote_dir.name
         self.login_node.local_runner.run(
-            f"rsync --recursive --links --safe-links --update {self.login_node.hostname}:{self.remote_dir} {self.local_dir.parent}"
+            f"rsync --recursive --links --safe-links --update "
+            f"{self.login_node.hostname}:{self.remote_dir} {self.local_dir.parent}"
         )
         logger.info(
             f"Local dir {self.local_dir} was updated with contents from {self.remote_dir} on the "
