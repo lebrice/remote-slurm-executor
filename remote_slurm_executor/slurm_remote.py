@@ -77,7 +77,7 @@ class RemoteDirSync:
         # https://serverfault.com/a/529295
         self.login_node.local_runner.run(
             f"rsync --recursive --links --safe-links --update "
-            f"{self.local_dir} {self.login_node.hostname}:{self.remote_dir}/"
+            f"{self.local_dir} {self.login_node.hostname}:{self.remote_dir.parent}"
         )
         logger.info(
             f"Local dir {self.local_dir} was copied to {self.remote_dir} on the "
@@ -89,7 +89,7 @@ class RemoteDirSync:
         assert self.local_dir.name == self.remote_dir.name
         self.login_node.local_runner.run(
             f"rsync --recursive --links --safe-links --update "
-            f"{self.login_node.hostname}:{self.remote_dir} {self.local_dir}/"
+            f"{self.login_node.hostname}:{self.remote_dir} {self.local_dir.parent}"
         )
         logger.info(
             f"Local dir {self.local_dir} was updated with contents from {self.remote_dir} on the "
