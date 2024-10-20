@@ -145,7 +145,7 @@ def get_first_id_independent_folder(folder: tp.Union[PurePath, str]) -> PurePosi
     return PurePosixPath(*indep_parts)
 
 
-class RemoteSlurmJob(core.Job[core.R]):
+class RemoteSlurmJob(core.Job[OutT]):
     _cancel_command = "scancel"
     watchers: ClassVar[dict[str, RemoteSlurmInfoWatcher]] = {}
     watcher: RemoteSlurmInfoWatcher
@@ -155,6 +155,7 @@ class RemoteSlurmJob(core.Job[core.R]):
         cluster: str,
         folder: tp.Union[str, Path],
         job_id: str,
+        remote_dir_sync: RemoteDirSync,
         tasks: tp.Sequence[int] = (0,),
     ) -> None:
         self.cluster = cluster
@@ -163,6 +164,7 @@ class RemoteSlurmJob(core.Job[core.R]):
         self.watcher = type(self).watchers.setdefault(
             self.cluster, RemoteSlurmInfoWatcher(cluster=cluster, delay_s=600)
         )
+        self.remote_dir_sync = remote_dir_sync
         super().__init__(folder=folder, job_id=job_id, tasks=tasks)
 
     def _interrupt(self, timeout: bool = False) -> None:
@@ -183,6 +185,10 @@ class RemoteSlurmJob(core.Job[core.R]):
         (subprocess.check_call if check else subprocess.call)(
             ["ssh", self.cluster, self._cancel_command, f"{self.job_id}"], shell=False
         )
+
+    def wait(self) -> None:
+        super().wait()
+        self.remote_dir_sync.sync_from_remote()
 
 
 @dataclass(init=False)
@@ -483,11 +489,12 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         job_id = self._get_job_id_from_submission_command(output)
         tasks_ids = list(range(self._num_tasks()))
 
-        job = self.job_class(
+        job = RemoteSlurmJob(
             cluster=self.cluster_hostname,
             folder=self.local_folder,
             job_id=job_id,
             tasks=tasks_ids,
+            remote_dir_sync=self.remote_dir_sync,
         )
         # This will probably not work!
         job.paths.move_temporary_file(
@@ -547,6 +554,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
                 folder=self.folder,
                 job_id=f"{first_job.job_id}_{a}",
                 tasks=tasks_ids,
+                remote_dir_sync=self.remote_dir_sync,
             )
             for a in range(n)
         ]
