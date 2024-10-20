@@ -32,23 +32,24 @@ def cluster(request: pytest.FixtureRequest) -> str:
 
 
 def test_autoexecutor(cluster: str):
-    folder = f"logs/{cluster}/%j"
+    folder = "logs/%j"
     executor = submitit.AutoExecutor(
         folder=folder,  # todo: perhaps we can rename this folder?
         cluster="remoteslurm",
         remoteslurm_cluster_hostname=cluster,
+        remoteslurm_I_dont_care_about_reproducibility=True,
     )
     assert isinstance(executor._executor, remote_slurm_executor.RemoteSlurmExecutor)
-    assert executor._executor.folder == PosixPath(folder)
+    assert executor._executor.folder == PosixPath(folder).absolute()
     assert executor._executor.cluster_hostname == cluster
 
 
 @pytest.fixture()
 def executor(cluster: str):
     executor = remote_slurm_executor.RemoteSlurmExecutor(
-        folder=f"logs/{cluster}/%j",  # todo: perhaps we can rename this folder?
+        folder="logs/%j",  # todo: perhaps we can rename this folder?
         cluster_hostname=cluster,
-        # I_dont_care_about_reproducibility=True,
+        I_dont_care_about_reproducibility=True,
     )
 
     if cluster != "mila":
