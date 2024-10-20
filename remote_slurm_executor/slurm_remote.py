@@ -50,19 +50,34 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class RemoteDirSync:
-    login_node: RemoteV2
+    login_node: "LoginNode"
     remote_dir: PurePosixPath
     local_dir: Path
 
+    def copy_to_remote(self, local_path: Path, remote_path: PurePosixPath):
+        assert local_path.is_file()
+        self.login_node.run(f"mkdir -p {remote_path.parent}")
+        self.login_node.local_runner.run(
+            f"scp {local_path} {self.login_node.hostname}:{remote_path}"
+        )
+
+    def copy_from_remote(self, remote_path: PurePosixPath, local_path: Path):
+        assert self.login_node.file_exists(remote_path)
+        local_path.parent.mkdir(exist_ok=True, parents=True)
+        self.login_node.local_runner.run(
+            f"scp {self.login_node.hostname}:{remote_path} {local_path}"
+        )
+
     def sync_to_remote(self):
-        # TODO: Need to double-check, not sure what rsync does if the target dir already exists, seems
-        # to create a new folder in it, e.g. logs/mila --> logs/mila/mila
+        # Note: rsync creates a new dir if the target dir already exists:
+        # e.g. logs/mila --> logs/mila/mila (there might be flag for this though)
         self.login_node.run(f"mkdir -p {self.remote_dir}")
         self.local_dir.mkdir(exist_ok=True, parents=True)
         assert self.local_dir.name == self.remote_dir.name
+        # https://serverfault.com/a/529295
         self.login_node.local_runner.run(
             f"rsync --recursive --links --safe-links --update "
-            f"{self.local_dir} {self.login_node.hostname}:{self.remote_dir.parent}"
+            f"{self.local_dir} {self.login_node.hostname}:{self.remote_dir}/"
         )
         logger.info(
             f"Local dir {self.local_dir} was copied to {self.remote_dir} on the "
@@ -74,7 +89,7 @@ class RemoteDirSync:
         assert self.local_dir.name == self.remote_dir.name
         self.login_node.local_runner.run(
             f"rsync --recursive --links --safe-links --update "
-            f"{self.login_node.hostname}:{self.remote_dir} {self.local_dir.parent}"
+            f"{self.login_node.hostname}:{self.remote_dir} {self.local_dir}/"
         )
         logger.info(
             f"Local dir {self.local_dir} was updated with contents from {self.remote_dir} on the "
@@ -84,7 +99,7 @@ class RemoteDirSync:
     def mount(self):
         self.login_node.run(f"mkdir -p {self.remote_dir}")
         self.local_dir.mkdir(exist_ok=True, parents=True)
-        LocalV2.run(
+        self.login_node.local_runner.run(
             (
                 "sshfs",
                 f"{self.login_node.hostname}:{self.remote_dir}",
@@ -244,9 +259,8 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         base_folder = get_first_id_independent_folder(folder)
         rest_of_folder = folder.relative_to(base_folder)
 
-        # Local folder is a real "local" folder that we'll just sync as needed with the remote.
         self.local_base_folder = Path(base_folder).absolute()
-        self.local_folder = self.local_base_folder / rest_of_folder
+        self.local_folder = Path(folder).absolute()
 
         # This is the folder where we store the pickle files on the remote.
         self.remote_base_folder = self.remote_scratch / ".submitit" / base_folder
@@ -269,7 +283,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         #     self.remote_dir_sync.mount()
 
         super().__init__(
-            folder=self.local_folder, max_num_timeout=max_num_timeout, python=python
+            folder=Path(folder), max_num_timeout=max_num_timeout, python=python
         )
         # No need to make it absolute. Revert it back to a relative path?
         assert self.folder == self.local_folder.absolute()
@@ -361,7 +375,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
     def map_array(
         self, fn: Callable[..., OutT], *iterable: Iterable[Any]
     ) -> list[RemoteSlurmJob[OutT]]:
-        submissions = [utils.DelayedSubmission(fn, *args) for args in zip(*iterable)]
+        submissions = [DelayedSubmission(fn, *args) for args in zip(*iterable)]
         if len(submissions) == 0:
             warnings.warn("Received an empty job array")
             return []
@@ -461,6 +475,11 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # return " ".join([self.python, "-u -m submitit.core._submit", shlex.quote(str(self.folder))])
         return f"{self.python} -u -m submitit.core._submit {shlex.quote(str(self.remote_folder))}"
 
+    def _get_remote_path(self, local_path: Path) -> PurePosixPath:
+        return self.remote_base_folder / local_path.absolute().relative_to(
+            self.local_base_folder.absolute()
+        )
+
     def _submit_command(self, command: str) -> RemoteSlurmJob:
         # Copied and adapted from PicklingExecutor.
         tmp_uuid = uuid.uuid4().hex
@@ -472,17 +491,13 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         with submission_file_path.open("w") as f:
             f.write(self._make_submission_file_text(command, tmp_uuid))
 
-        assert submission_file_path.is_relative_to(self.local_base_folder.absolute())
-        self.remote_dir_sync.sync_to_remote()
+        submission_file_on_remote = self._get_remote_path(submission_file_path)
 
-        relative_submission_file_path = submission_file_path.relative_to(
-            self.local_base_folder.absolute()
-        )
-        path_to_submission_file_on_remote = (
-            self.remote_base_folder / relative_submission_file_path
+        self.remote_dir_sync.copy_to_remote(
+            submission_file_path, submission_file_on_remote
         )
 
-        command_list = self._make_submission_command(path_to_submission_file_on_remote)
+        command_list = self._make_submission_command(submission_file_on_remote)
         # run
         output = utils.CommandFunction(command_list, verbose=False)()  # explicit errors
         job_id = self._get_job_id_from_submission_command(output)
@@ -495,10 +510,20 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             tasks=tasks_ids,
             remote_dir_sync=self.remote_dir_sync,
         )
-        # This will probably not work!
-        job.paths.move_temporary_file(
-            submission_file_path, "submission_file", keep_as_symlink=True
-        )
+
+        # TODO: Need to do those on the remote? Or can we get away with doing it
+        # locally and rsync-ing the dir? (which will reflect this with symlink
+        # changes and such?)
+        # env = self.login_node.get_output(f"srun --pty --overlap --jobid {job_id} env")
+
+        # job.paths.move_temporary_file(
+        #     submission_file_path, "submission_file", keep_as_symlink=True
+        # )
+        tmp_path = submission_file_path
+        job.paths.folder.mkdir(parents=True, exist_ok=True)
+        Path(tmp_path).rename(job.paths.submission_file)
+        Path(tmp_path).symlink_to(job.paths.submission_file)
+
         # TODO: The rest here isn't used? Seems to be meant for another executor
         # (maybe a conda-based executor (chronos?) internal to FAIR?) (hinted at
         # in doctrings and such).
@@ -527,6 +552,8 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             pickle_paths.append(pickle_path)
         n = len(delayed_submissions)
 
+        self.remote_dir_sync.sync_to_remote()
+
         # NOTE: I don't yet understand this part here. Seems like poor design to me.
 
         # Make a copy of the executor, since we don't want other jobs to be
@@ -547,8 +574,8 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             self._submitit_command_str
         )
         tasks_ids = list(range(first_job.num_tasks))
-        jobs: tp.List[core.Job[tp.Any]] = [
-            RemoteSlurmJob(
+        jobs = [
+            RemoteSlurmJob[OutT](
                 cluster=self.cluster_hostname,
                 folder=self.folder,
                 job_id=f"{first_job.job_id}_{a}",
@@ -601,7 +628,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # return -1 if shutil.which("srun") is None else 2
 
 
-from milatools.utils.remote_v2 import SSH_CONFIG_FILE, Hide, RemoteV2
+from milatools.utils.remote_v2 import SSH_CONFIG_FILE, Hide
 
 
 class LoginNode(RemoteV2):
