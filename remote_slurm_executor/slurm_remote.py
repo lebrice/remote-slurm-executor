@@ -573,6 +573,8 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         first_job: core.Job[tp.Any] = array_ex._submit_command(
             self._submitit_command_str
         )
+        self.remote_dir_sync.sync_to_remote()
+
         tasks_ids = list(range(first_job.num_tasks))
         jobs = [
             RemoteSlurmJob[OutT](
@@ -584,6 +586,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             )
             for a in range(n)
         ]
+
         for job, pickle_path in zip(jobs, pickle_paths):
             job.paths.move_temporary_file(pickle_path, "submitted_pickle")
         return jobs
