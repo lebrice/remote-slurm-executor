@@ -49,7 +49,7 @@ def executor(cluster: str):
     executor = remote_slurm_executor.RemoteSlurmExecutor(
         folder="logs/%j",  # todo: perhaps we can rename this folder?
         cluster_hostname=cluster,
-        # I_dont_care_about_reproducibility=True,
+        I_dont_care_about_reproducibility=True,
     )
 
     if cluster != "mila":

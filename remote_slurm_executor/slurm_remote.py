@@ -43,6 +43,8 @@ P = ParamSpec("P")
 A = TypeVar("A")
 B = TypeVar("B")
 C = TypeVar("C")
+D = TypeVar("D")
+E = TypeVar("E")
 
 logger = logging.getLogger(__name__)
 
@@ -312,7 +314,8 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         fn: Callable[[A], OutT],
         _a: Iterable[A],
         /,
-    ) -> list[core.Job[OutT]]: ...
+    ) -> list[core.Job[OutT]]:
+        ...
 
     @overload
     def map_array(
@@ -321,7 +324,8 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         _a: Iterable[A],
         _b: Iterable[B],
         /,
-    ) -> list[core.Job[OutT]]: ...
+    ) -> list[core.Job[OutT]]:
+        ...
 
     @overload
     def map_array(
@@ -331,7 +335,33 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         _b: Iterable[B],
         _c: Iterable[C],
         /,
-    ) -> list[core.Job[OutT]]: ...
+    ) -> list[core.Job[OutT]]:
+        ...
+
+    @overload
+    def map_array(
+        self,
+        fn: Callable[[A, B, C, D], OutT],
+        _a: Iterable[A],
+        _b: Iterable[B],
+        _c: Iterable[C],
+        _d: Iterable[D],
+        /,
+    ) -> list[core.Job[OutT]]:
+        ...
+
+    @overload
+    def map_array(
+        self,
+        fn: Callable[[A, B, C, D, E], OutT],
+        _a: Iterable[A],
+        _b: Iterable[B],
+        _c: Iterable[C],
+        _d: Iterable[D],
+        _e: Iterable[E],
+        /,
+    ) -> list[core.Job[OutT]]:
+        ...
 
     def map_array(
         self, fn: Callable[..., OutT], *iterable: Iterable[Any]
@@ -436,6 +466,11 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # return " ".join([self.python, "-u -m submitit.core._submit", shlex.quote(str(self.folder))])
         return f"{self.python} -u -m submitit.core._submit {shlex.quote(str(self.remote_folder))}"
 
+    def _copy_to_remote(self, local_path: Path):
+        remote_path = self._get_remote_path(local_path)
+        self.remote_dir_sync.copy_to_remote(local_path, remote_path)
+        return remote_path
+
     def _get_remote_path(self, local_path: Path) -> PurePosixPath:
         return self.remote_base_folder / local_path.absolute().relative_to(
             self.local_base_folder.absolute()
@@ -459,7 +494,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         )
 
         command_list = self._make_submission_command(submission_file_on_remote)
-        # run
+        # run the sbatch command.
         output = utils.CommandFunction(command_list, verbose=False)()  # explicit errors
         job_id = self._get_job_id_from_submission_command(output)
         tasks_ids = list(range(self._num_tasks()))
@@ -481,6 +516,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         #     submission_file_path, "submission_file", keep_as_symlink=True
         # )
         tmp_path = submission_file_path
+        breakpoint()
         job.paths.folder.mkdir(parents=True, exist_ok=True)
         Path(tmp_path).rename(job.paths.submission_file)
         Path(tmp_path).symlink_to(job.paths.submission_file)
@@ -511,9 +547,10 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             d.set_timeout(timeout_min, self.max_num_timeout)
             d.dump(pickle_path)
             pickle_paths.append(pickle_path)
+            self._copy_to_remote(pickle_path)
         n = len(delayed_submissions)
 
-        self.remote_dir_sync.sync_to_remote()
+        # self.remote_dir_sync.sync_to_remote()
 
         # NOTE: I don't yet understand this part here. Seems like poor design to me.
 
