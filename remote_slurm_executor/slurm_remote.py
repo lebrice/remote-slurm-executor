@@ -307,9 +307,14 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             self.predownload_dependencies()
 
         # chdir to the repo so that `uv run` uses the dependencies, etc at that commit.
-        srun_args: list[str] = self.parameters.setdefault("srun_args", [])
-        srun_args.append(f"--chdir={self.worktree_path}")
+        # Note: Here we avoid mutating the passed in lists or dicts.
+        self.parameters["srun_args"] = self.parameters.get("srun_args", []) + [
+            f"--chdir={self.worktree_path}"
+        ]
         self.parameters.setdefault("stderr_to_stdout", True)
+        self.parameters["setup"] = self.parameters.get("setup", []) + [
+            f"# {cluster_hostname=}",
+        ]
 
     def submit(
         self, fn: Callable[P, OutT], *args: P.args, **kwargs: P.kwargs
@@ -573,7 +578,9 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             f"ln -s {_get_remote_path(job.paths.submission_file)} {submission_file_on_remote}"
         )
         # TODO: Also reflect this locally?
-        submission_file_path.unlink()
+        job.paths.submission_file.parent.mkdir(parents=True, exist_ok=True)
+        submission_file_path.rename(job.paths.submission_file)
+        submission_file_path.symlink_to(job.paths.submission_file)
 
         # TODO: The rest here isn't used? Seems to be meant for another executor
         # (maybe a conda-based executor (chronos?) internal to FAIR?) (hinted at
