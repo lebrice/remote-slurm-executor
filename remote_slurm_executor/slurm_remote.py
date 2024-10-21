@@ -84,9 +84,20 @@ class RemoteDirSync:
     def _copy_to_remote(self, local_path: Path, remote_path: PurePosixPath):
         assert local_path.is_file()
         self.login_node.run(f"mkdir -p {remote_path.parent}")
+        # if self.login_node.file_exists(remote_path):
         self.login_node.local_runner.run(
             f"scp {local_path} {self.login_node.hostname}:{remote_path}", display=False
         )
+        # else:
+        #     assert self.login_node.dir_exists(remote_path)
+        #     self.login_node.local_runner.run(
+        #         f"scp -r {local_path} {self.login_node.hostname}:{remote_path}", display=False
+        #     )
+        # Could also perhaps use rsync?
+        # self.login_node.local_runner.run(
+        #     f"rsync --recursive --links --safe-links --update "
+        #     f"{self.local_dir} {self.login_node.hostname}:{self.remote_dir.parent}"
+        # )
 
     def _get_from_remote(self, remote_path: PurePosixPath, local_path: Path):
         # todo: switch between rsync and scp based on in the remote path is a file or a dir?
@@ -102,38 +113,11 @@ class RemoteDirSync:
                 f"scp -r {self.login_node.hostname}:{remote_path} {local_path}",
                 display=False,
             )
+        # Could also perhaps use rsync?
         # self.login_node.local_runner.run(
         #     f"rsync --recursive --links --safe-links --update "
         #     f"{self.login_node.hostname}:{self.remote_dir} {self.local_dir.parent}"
         # )
-
-    def sync_to_remote(self):
-        # Note: rsync creates a new dir if the target dir already exists:
-        # e.g. logs/mila --> logs/mila/mila (there might be flag for this though)
-        self.login_node.run(f"mkdir -p {self.remote_dir}")
-        self.local_dir.mkdir(exist_ok=True, parents=True)
-        assert self.local_dir.name == self.remote_dir.name
-        # https://serverfault.com/a/529295
-        self.login_node.local_runner.run(
-            f"rsync --recursive --links --safe-links --update "
-            f"{self.local_dir} {self.login_node.hostname}:{self.remote_dir.parent}"
-        )
-        logger.info(
-            f"Local dir {self.local_dir} was copied to {self.remote_dir} on the "
-            f"{self.login_node.hostname} cluster."
-        )
-
-    def sync_from_remote(self):
-        self.local_dir.mkdir(exist_ok=True, parents=True)
-        assert self.local_dir.name == self.remote_dir.name
-        self.login_node.local_runner.run(
-            f"rsync --recursive --links --safe-links --update "
-            f"{self.login_node.hostname}:{self.remote_dir} {self.local_dir.parent}"
-        )
-        logger.info(
-            f"Local dir {self.local_dir} was updated with contents from {self.remote_dir} on the "
-            f"{self.login_node.hostname} cluster."
-        )
 
 
 class RemoteSlurmInfoWatcher(SlurmInfoWatcher):
@@ -231,7 +215,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
     ## TODOs:
     - [ ] Unable to launch jobs from the `master` branch of a repo, because we try to create a
           worktree and the branch is already checked out in the cloned repo!
-
+    - [ ] Having issues on narval where the venv can't be created?
     """
 
     job_class: ClassVar[type[RemoteSlurmJob]] = RemoteSlurmJob
@@ -446,7 +430,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         with self.login_node.chdir(self.worktree_path):
             self.login_node.run(f"{self._uv_path} sync --all-extras --frozen")
             # Remove the venv since we just want the dependencies to be downloaded to the cache)
-            self.login_node.run("rm -r .venv")
+            # self.login_node.run("rm -r .venv")
 
         # IDEA: IF there is internet access on the compute nodes, then perhaps we could sync the
         # dependencies on a compute node instead of on the login nodes?
@@ -588,6 +572,8 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         self.login_node.run(
             f"ln -s {_get_remote_path(job.paths.submission_file)} {submission_file_on_remote}"
         )
+        # TODO: Also reflect this locally?
+        submission_file_path.unlink()
 
         # TODO: The rest here isn't used? Seems to be meant for another executor
         # (maybe a conda-based executor (chronos?) internal to FAIR?) (hinted at
@@ -840,17 +826,17 @@ def get_slurm_account(cluster: str) -> str:
 
     When there are multiple accounts, this selects the first account, alphabetically.
 
-    On DRAC cluster, this uses the `def` allocations instead of `rrg`, and when
+    On DRAC cluster, this uses the `rrg` allocations instead of `def`, and when
     the rest of the accounts are the same up to a '_cpu' or '_gpu' suffix, it uses
-    '_cpu'.
+    '_gpu'.
 
     For example:
 
     ```text
-    def-someprofessor_cpu  <-- this one is used.
+    def-someprofessor_cpu
     def-someprofessor_gpu
     rrg-someprofessor_cpu
-    rrg-someprofessor_gpu
+    rrg-someprofessor_gpu  <-- this one is used.
     ```
     """
     logger.info(
@@ -864,6 +850,6 @@ def get_slurm_account(cluster: str) -> str:
     accounts = [line.strip() for line in result.stdout.splitlines()]
     assert accounts
     logger.info(f"Accounts on the slurm cluster {cluster}: {accounts}")
-    account = sorted(accounts)[0]
+    account = sorted(accounts)[-1]
     logger.info(f"Using account {account} to launch jobs.")
     return account
