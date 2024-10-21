@@ -14,7 +14,6 @@ import time
 import typing as tp
 import uuid
 import warnings
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath
 from typing import (
@@ -95,44 +94,6 @@ class RemoteDirSync:
             f"Local dir {self.local_dir} was updated with contents from {self.remote_dir} on the "
             f"{self.login_node.hostname} cluster."
         )
-
-    def mount(self):
-        self.login_node.run(f"mkdir -p {self.remote_dir}")
-        self.local_dir.mkdir(exist_ok=True, parents=True)
-        self.login_node.local_runner.run(
-            (
-                "sshfs",
-                f"{self.login_node.hostname}:{self.remote_dir}",
-                str(self.local_dir),
-            ),
-            display=True,
-        )
-
-        logger.info(
-            f"Remote dir {self.login_node.hostname}:{self.remote_dir} is now mounted at {self.local_dir}"
-        )
-
-    def unmount(self):
-        LocalV2.run(("fusermount", "--unmount", str(self.local_dir)), display=True)
-
-    @contextmanager
-    def context(self):
-        if not self.is_mounted():
-            self.mount()
-        yield
-        self.unmount()
-
-    def is_mounted(self) -> bool:
-        # Check mounted filesystems using the 'mount' command
-        output = LocalV2.get_output("mount")
-        # Search for the specific mount point in the output
-        if any(
-            f"{self.login_node.hostname}:{self.remote_dir} on {self.local_dir.absolute()} type fuse.sshfs"
-            in line
-            for line in output.splitlines()
-        ):
-            return True
-        return False
 
 
 class RemoteSlurmInfoWatcher(SlurmInfoWatcher):
