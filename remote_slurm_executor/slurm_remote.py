@@ -283,15 +283,20 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
     def submit(
         self, fn: Callable[P, OutT], *args: P.args, **kwargs: P.kwargs
-    ) -> core.Job[OutT]:
+    ) -> core.DelayedJob[OutT] | RemoteSlurmJob[OutT]:
         ds = DelayedSubmission(fn, *args, **kwargs)
         super().submit
         if self._delayed_batch is not None:
             job: core.Job[OutT] = core.DelayedJob(self)
             self._delayed_batch.append((job, ds))
-            assert type(job) is not core.Job  # pylint: disable=unidiomatic-typecheck
-            return job
-        return self.process_submission(ds)
+        else:
+            job = self.process_submission(ds)
+        # IDK why this is in the base class?
+        if type(job) is core.Job:  # pylint: disable=unidiomatic-typecheck
+            raise RuntimeError(
+                "Executors should never return a base Job class (implementation issue)"
+            )
+        return job
 
     def process_submission(
         self, ds: DelayedSubmission[..., OutT]
@@ -748,7 +753,7 @@ class LoginNode(RemoteV2):
         command: str,
         *,
         input: str | None = None,
-        display: bool = True,
+        display: bool = False,  # changed to default of False
         warn: bool = False,
         hide: Hide = False,
     ):
@@ -768,7 +773,7 @@ class LoginNode(RemoteV2):
         command: str,
         *,
         input: str | None = None,
-        display: bool = True,
+        display: bool = False,  # changed to default of False
         warn: bool = False,
         hide: Hide = False,
     ) -> subprocess.CompletedProcess[str]:
@@ -810,7 +815,7 @@ def get_slurm_account(cluster: str) -> str:
     logger.info(
         f"Fetching the list of SLURM accounts available on the {cluster} cluster."
     )
-    result = RemoteV2(cluster).run(
+    result = LoginNode(cluster).run(
         "sacctmgr --noheader show associations where user=$USER format=Account%50"
     )
     accounts = [line.strip() for line in result.stdout.splitlines()]
