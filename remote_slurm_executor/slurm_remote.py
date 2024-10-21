@@ -364,6 +364,9 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         new_pickle_path = _get_remote_path(job.paths.submitted_pickle)
         self.login_node.run(f"mkdir -p {new_pickle_path.parent}")
         self.login_node.run(f"mv {remote_pickle_path} {new_pickle_path}")
+        # Also reflect this change locally?
+        job.paths.submitted_pickle.parent.mkdir(exist_ok=True, parents=True)
+        pickle_path.rename(job.paths.submitted_pickle)
 
         # self.remote_dir_sync.sync_to_remote()
         return job
