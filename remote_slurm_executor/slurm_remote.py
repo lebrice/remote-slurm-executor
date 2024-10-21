@@ -586,9 +586,19 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             )
             for a in range(n)
         ]
-
+        # TODO: Handle these more explicitly.
         for job, pickle_path in zip(jobs, pickle_paths):
-            job.paths.move_temporary_file(pickle_path, "submitted_pickle")
+            job.paths.submitted_pickle
+            job.paths.folder.mkdir(parents=True, exist_ok=True)
+            Path(pickle_path).rename(job.paths.submitted_pickle)
+            self.remote_dir_sync.copy_to_remote(
+                job.paths.submitted_pickle,
+                self._get_remote_path(job.paths.submitted_pickle),
+            )
+            # job.paths.move_temporary_file(pickle_path, "submitted_pickle")
+
+        # self.remote_dir_sync.sync_to_remote()
+
         return jobs
 
     def _make_submission_file_text(self, command: str, uid: str) -> str:
