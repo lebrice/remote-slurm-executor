@@ -28,7 +28,6 @@ from typing import (
     overload,
 )
 
-import rich
 from milatools.cli import console
 from milatools.cli.utils import SSH_CONFIG_FILE
 from milatools.utils.local_v2 import LocalV2
@@ -228,6 +227,11 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
     - Installs `uv` on the remote cluster.
     - Syncs dependencies with `uv sync --all-extras` on the login node.
+
+    ## TODOs:
+    - [ ] Unable to launch jobs from the `master` branch of a repo, because we try to create a
+          worktree and the branch is already checked out in the cloned repo!
+
     """
 
     job_class: ClassVar[type[RemoteSlurmJob]] = RemoteSlurmJob
@@ -275,14 +279,14 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # that it's in $HOME (or, more precisely, on the same filesystem as the worktrees will be
         # created, which is currently in $HOME/worktrees
 
-        # "base" folder := dir without any %j %t, %A, etc.
-        base_folder = get_first_id_independent_folder(folder)
-        rest_of_folder = folder.relative_to(base_folder)
-
         # Where we clone the repo on the cluster.
         self.repo_dir_on_cluster = PurePosixPath(
             repo_dir_on_cluster or (self.remote_home / "repos" / current_repo_name())
         )
+
+        # "base" folder := dir without any %j %t, %A, etc.
+        base_folder = get_first_id_independent_folder(folder)
+        rest_of_folder = folder.relative_to(base_folder)
 
         self.local_base_folder = Path(base_folder).absolute()
         self.local_folder = Path(folder).absolute()
@@ -298,6 +302,9 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         )
 
         assert python is None, "TODO: Can't use something else than uv for now."
+
+        # note: seems like we really need to specify the path to uv since `srun --pty uv` doesn't
+        # work.
         self._uv_path: str = self.setup_uv()
         _python_version = ".".join(map(str, sys.version_info[:3]))
         offline = "--offline " if not self.internet_access_on_compute_nodes else ""
@@ -449,10 +456,11 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
         if not self.I_dont_care_about_reproducibility:
             if LocalV2.get_output("git status --porcelain"):
-                rich.print(
+                console.print(
                     "You have uncommitted changes, please commit and push them before re-running the command.\n"
                     "(This is necessary in order to sync local code with the remote cluster, and is also a good "
-                    "practice for reproducibility.)"
+                    "practice for reproducibility.)",
+                    style="orange",
                 )
                 exit(1)
             # Local git repo is clean, push HEAD to the remote.
