@@ -31,7 +31,7 @@ from typing import (
 from milatools.cli import console
 from milatools.cli.utils import SSH_CONFIG_FILE
 from milatools.utils.local_v2 import LocalV2
-from milatools.utils.remote_v2 import RemoteV2
+from milatools.utils.remote_v2 import Hide, RemoteV2
 from submitit.core import core, utils
 from submitit.slurm import slurm
 from submitit.slurm.slurm import SlurmInfoWatcher, SlurmJobEnvironment
@@ -709,9 +709,6 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
     def affinity(cls) -> int:
         return 2
         # return -1 if shutil.which("srun") is None else 2
-
-
-from milatools.utils.remote_v2 import SSH_CONFIG_FILE, Hide
 
 
 class LoginNode(RemoteV2):
