@@ -726,7 +726,7 @@ class LoginNode(RemoteV2):
         return super().run(
             self.command_prefix + command,
             input=input,
-            display=display,
+            display=False,
             warn=warn,
             hide=hide,
         )
