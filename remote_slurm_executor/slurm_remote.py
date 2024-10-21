@@ -189,6 +189,7 @@ class RemoteSlurmJob(core.Job[OutT]):
         super().wait()
         logger.info(f"Copying folder {self.paths.folder} from the remote.")
         self.remote_dir_sync.get_from_remote(local_path=self.paths.folder)
+        self.remote_dir_sync.get_from_remote(local_path=self.paths.stdout)
 
 
 @dataclass(init=False)
@@ -452,7 +453,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
                     "You have uncommitted changes, please commit and push them before re-running the command.\n"
                     "(This is necessary in order to sync local code with the remote cluster, and is also a good "
                     "practice for reproducibility.)",
-                    style="orange",
+                    style="orange3",  # Why the hell isn't 'orange' a colour?!
                 )
                 exit(1)
             # Local git repo is clean, push HEAD to the remote.
