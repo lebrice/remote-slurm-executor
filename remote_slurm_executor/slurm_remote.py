@@ -428,7 +428,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             "and available for the job later."
         )
         with self.login_node.chdir(self.worktree_path):
-            self.login_node.run(f"{self._uv_path} sync --all-extras --frozen")
+            self.login_node.run(f"{self._uv_path} sync --offline --all-extras --frozen")
             # Remove the venv since we just want the dependencies to be downloaded to the cache)
             # self.login_node.run("rm -r .venv")
 
