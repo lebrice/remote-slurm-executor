@@ -190,6 +190,7 @@ class RemoteSlurmJob(core.Job[OutT]):
         logger.info(f"Copying folder {self.paths.folder} from the remote.")
         self.remote_dir_sync.get_from_remote(local_path=self.paths.folder)
         self.remote_dir_sync.get_from_remote(local_path=self.paths.stdout)
+        self.remote_dir_sync.get_from_remote(local_path=self.paths.result_pickle)
 
 
 @dataclass(init=False)
