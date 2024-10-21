@@ -55,14 +55,32 @@ class RemoteDirSync:
     remote_dir: PurePosixPath
     local_dir: Path
 
-    def copy_to_remote(self, local_path: Path, remote_path: PurePosixPath):
+    def copy_to_remote(self, local_path: Path) -> PurePosixPath:
+        remote_path = self._get_remote_path(local_path)
+        self._copy_to_remote(local_path, remote_path)
+        return remote_path
+
+    def get_from_remote(self, remote_path: PurePosixPath) -> Path:
+        local_path = self._get_local_path(remote_path)
+        self._get_from_remote(remote_path, local_path=local_path)
+        return local_path
+
+    def _get_remote_path(self, local_path: Path) -> PurePosixPath:
+        return self.remote_dir / (
+            local_path.absolute().relative_to(self.local_dir.absolute())
+        )
+
+    def _get_local_path(self, remote_path: PurePosixPath) -> Path:
+        return self.local_dir / (remote_path.relative_to(self.remote_dir))
+
+    def _copy_to_remote(self, local_path: Path, remote_path: PurePosixPath):
         assert local_path.is_file()
         self.login_node.run(f"mkdir -p {remote_path.parent}")
         self.login_node.local_runner.run(
             f"scp {local_path} {self.login_node.hostname}:{remote_path}"
         )
 
-    def copy_from_remote(self, remote_path: PurePosixPath, local_path: Path):
+    def _get_from_remote(self, remote_path: PurePosixPath, local_path: Path):
         assert self.login_node.file_exists(remote_path)
         local_path.parent.mkdir(exist_ok=True, parents=True)
         self.login_node.local_runner.run(
@@ -267,11 +285,11 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         self, fn: Callable[P, OutT], *args: P.args, **kwargs: P.kwargs
     ) -> core.Job[OutT]:
         ds = DelayedSubmission(fn, *args, **kwargs)
-
+        super().submit
         if self._delayed_batch is not None:
             job: core.Job[OutT] = core.DelayedJob(self)
             self._delayed_batch.append((job, ds))
-            assert type(job) is core.Job  # pylint: disable=unidiomatic-typecheck
+            assert type(job) is not core.Job  # pylint: disable=unidiomatic-typecheck
             return job
         return self.process_submission(ds)
 
@@ -466,16 +484,6 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # return " ".join([self.python, "-u -m submitit.core._submit", shlex.quote(str(self.folder))])
         return f"{self.python} -u -m submitit.core._submit {shlex.quote(str(self.remote_folder))}"
 
-    def _copy_to_remote(self, local_path: Path):
-        remote_path = self._get_remote_path(local_path)
-        self.remote_dir_sync.copy_to_remote(local_path, remote_path)
-        return remote_path
-
-    def _get_remote_path(self, local_path: Path) -> PurePosixPath:
-        return self.remote_base_folder / local_path.absolute().relative_to(
-            self.local_base_folder.absolute()
-        )
-
     def _submit_command(self, command: str) -> RemoteSlurmJob:
         # Copied and adapted from PicklingExecutor.
         tmp_uuid = uuid.uuid4().hex
@@ -487,10 +495,8 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         with submission_file_path.open("w") as f:
             f.write(self._make_submission_file_text(command, tmp_uuid))
 
-        submission_file_on_remote = self._get_remote_path(submission_file_path)
-
-        self.remote_dir_sync.copy_to_remote(
-            submission_file_path, submission_file_on_remote
+        submission_file_on_remote = self.remote_dir_sync.copy_to_remote(
+            submission_file_path
         )
 
         command_list = self._make_submission_command(submission_file_on_remote)
@@ -512,14 +518,27 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # changes and such?)
         # env = self.login_node.get_output(f"srun --pty --overlap --jobid {job_id} env")
 
+        ## NOTE: This function call in the base class:
+
         # job.paths.move_temporary_file(
         #     submission_file_path, "submission_file", keep_as_symlink=True
         # )
-        tmp_path = submission_file_path
-        breakpoint()
-        job.paths.folder.mkdir(parents=True, exist_ok=True)
-        Path(tmp_path).rename(job.paths.submission_file)
-        Path(tmp_path).symlink_to(job.paths.submission_file)
+
+        ## Gets expanded to this, with `tmp_path=submission_file_path`:
+
+        # job.paths.folder.mkdir(parents=True, exist_ok=True)
+        # Path(submission_file_path).rename(job.paths.submission_file)
+        # Path(submission_file_path).symlink_to(job.paths.submission_file)
+
+        ## And executing the equivalent over SSH looks like this:
+        _get_remote_path = self.remote_dir_sync._get_remote_path
+        self.login_node.run(f"mkdir -p {_get_remote_path(job.paths.folder)}")
+        self.login_node.run(
+            f"mv {submission_file_on_remote} {_get_remote_path(job.paths.submission_file)}"
+        )
+        self.login_node.run(
+            f"ln -s {_get_remote_path(job.paths.submission_file)} {submission_file_on_remote}"
+        )
 
         # TODO: The rest here isn't used? Seems to be meant for another executor
         # (maybe a conda-based executor (chronos?) internal to FAIR?) (hinted at
@@ -541,13 +560,13 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         folder = utils.JobPaths.get_first_id_independent_folder(self.folder)
         folder.mkdir(parents=True, exist_ok=True)
         timeout_min = self.parameters.get("time", 5)
-        pickle_paths = []
+        local_pickle_paths: list[Path] = []
         for d in delayed_submissions:
-            pickle_path = folder / f"{uuid.uuid4().hex}.pkl"
+            _pickle_path = folder / f"{uuid.uuid4().hex}.pkl"
             d.set_timeout(timeout_min, self.max_num_timeout)
-            d.dump(pickle_path)
-            pickle_paths.append(pickle_path)
-            self._copy_to_remote(pickle_path)
+            d.dump(_pickle_path)
+            local_pickle_paths.append(_pickle_path)
+
         n = len(delayed_submissions)
 
         # self.remote_dir_sync.sync_to_remote()
@@ -571,7 +590,6 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         first_job: core.Job[tp.Any] = array_ex._submit_command(
             self._submitit_command_str
         )
-        self.remote_dir_sync.sync_to_remote()
 
         tasks_ids = list(range(first_job.num_tasks))
         jobs = [
@@ -585,17 +603,22 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             for a in range(n)
         ]
         # TODO: Handle these more explicitly.
-        for job, pickle_path in zip(jobs, pickle_paths):
-            job.paths.submitted_pickle
-            job.paths.folder.mkdir(parents=True, exist_ok=True)
-            Path(pickle_path).rename(job.paths.submitted_pickle)
-            self.remote_dir_sync.copy_to_remote(
-                job.paths.submitted_pickle,
-                self._get_remote_path(job.paths.submitted_pickle),
-            )
+        for job, local_pickle_path in zip(jobs, local_pickle_paths):
             # job.paths.move_temporary_file(pickle_path, "submitted_pickle")
+            # self._copy_to_remote(job.paths.submitted_pickle)
+            _get_remote_path = self.remote_dir_sync._get_remote_path
 
-        # self.remote_dir_sync.sync_to_remote()
+            remote_pickle_path = self.remote_dir_sync.copy_to_remote(local_pickle_path)
+
+            self.login_node.run(
+                f"mkdir -p {_get_remote_path(job.paths.folder)}", display=False
+            )
+            self.login_node.run(
+                f"mv {remote_pickle_path} {_get_remote_path(job.paths.submitted_pickle)}",
+                display=False,
+            )
+            # job.paths.folder.mkdir(parents=True, exist_ok=True)
+            # Path(pickle_path).rename(job.paths.submitted_pickle)
 
         return jobs
 
