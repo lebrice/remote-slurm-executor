@@ -315,20 +315,22 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         ds.set_timeout(timeout_min, self.max_num_timeout)
         ds.dump(pickle_path)
 
-        self.remote_dir_sync.sync_to_remote()
+        remote_pickle_path = self.remote_dir_sync.copy_to_remote(pickle_path)
+        # self.remote_dir_sync.sync_to_remote()
 
         self._throttle()
         self._last_job_submitted = time.time()
         job = self._submit_command(self._submitit_command_str)
 
-        # TODO: Need to sync here?
-
         # job.paths.move_temporary_file(pickle_path, "submitted_pickle")
-        tmp_path = pickle_path
-        job.paths.folder.mkdir(parents=True, exist_ok=True)
-        Path(tmp_path).rename(job.paths.submitted_pickle)
+        # job.paths.folder.mkdir(parents=True, exist_ok=True)
+        # Path(pickle_path).rename(job.paths.submitted_pickle)
+        _get_remote_path = self.remote_dir_sync._get_remote_path
+        new_pickle_path = _get_remote_path(job.paths.submitted_pickle)
+        self.login_node.run(f"mkdir -p {new_pickle_path.parent}")
+        self.login_node.run(f"mv {remote_pickle_path} {new_pickle_path}")
 
-        self.remote_dir_sync.sync_to_remote()
+        # self.remote_dir_sync.sync_to_remote()
         return job
 
     @overload
