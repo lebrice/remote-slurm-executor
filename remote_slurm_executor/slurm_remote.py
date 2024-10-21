@@ -60,9 +60,18 @@ class RemoteDirSync:
         self._copy_to_remote(local_path, remote_path)
         return remote_path
 
-    def get_from_remote(self, remote_path: PurePosixPath) -> Path:
-        local_path = self._get_local_path(remote_path)
-        self._get_from_remote(remote_path, local_path=local_path)
+    def get_from_remote(
+        self, remote_path: PurePosixPath | None = None, local_path: Path | None = None
+    ) -> Path:
+        assert bool(remote_path) ^ bool(
+            local_path
+        ), "Exactly one of remote_path or local_path should be passed."
+        if remote_path:
+            local_path = self._get_local_path(remote_path)
+        else:
+            assert local_path
+            remote_path = self._get_remote_path(local_path)
+        self._get_from_remote(remote_path=remote_path, local_path=local_path)
         return local_path
 
     def _get_remote_path(self, local_path: Path) -> PurePosixPath:
@@ -77,15 +86,27 @@ class RemoteDirSync:
         assert local_path.is_file()
         self.login_node.run(f"mkdir -p {remote_path.parent}")
         self.login_node.local_runner.run(
-            f"scp {local_path} {self.login_node.hostname}:{remote_path}"
+            f"scp {local_path} {self.login_node.hostname}:{remote_path}", display=False
         )
 
     def _get_from_remote(self, remote_path: PurePosixPath, local_path: Path):
-        assert self.login_node.file_exists(remote_path)
+        # todo: switch between rsync and scp based on in the remote path is a file or a dir?
         local_path.parent.mkdir(exist_ok=True, parents=True)
-        self.login_node.local_runner.run(
-            f"scp {self.login_node.hostname}:{remote_path} {local_path}"
-        )
+        if self.login_node.file_exists(remote_path):
+            self.login_node.local_runner.run(
+                f"scp {self.login_node.hostname}:{remote_path} {local_path}",
+                display=False,
+            )
+        else:
+            assert self.login_node.dir_exists(remote_path)
+            self.login_node.local_runner.run(
+                f"scp -r {self.login_node.hostname}:{remote_path} {local_path}",
+                display=False,
+            )
+        # self.login_node.local_runner.run(
+        #     f"rsync --recursive --links --safe-links --update "
+        #     f"{self.login_node.hostname}:{self.remote_dir} {self.local_dir.parent}"
+        # )
 
     def sync_to_remote(self):
         # Note: rsync creates a new dir if the target dir already exists:
@@ -183,7 +204,8 @@ class RemoteSlurmJob(core.Job[OutT]):
 
     def wait(self) -> None:
         super().wait()
-        self.remote_dir_sync.sync_from_remote()
+        logger.info(f"Copying folder {self.paths.folder} from the remote.")
+        self.remote_dir_sync.get_from_remote(local_path=self.paths.folder)
 
 
 @dataclass(init=False)
@@ -215,11 +237,28 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         folder: PurePath | str,
         *,
         cluster_hostname: str,
+        repo_dir_on_cluster: PurePosixPath | str | None = None,
         internet_access_on_compute_nodes: bool = True,
         max_num_timeout: int = 3,
         python: str | None = None,
         I_dont_care_about_reproducibility: bool = False,
     ) -> None:
+        """ Create a new remote slurm executor.
+
+        Args:
+            folder: The output folder (same idea as the base class)
+            cluster_hostname: Hostname of the cluster to connect to.
+            repo_dir_on_cluster: The directory on the cluster where the repo is cloned. If not \
+                passed, the repo is cloned in `$HOME/repos/<repo_name>`.
+            internet_access_on_compute_nodes: Whether compute nodes on that cluster have access to \
+                the internet.
+            max_num_timeout: Maximum number of job timeouts before giving up (from the base \
+                class constructor).
+            python: Python command. Defaults to `uv run --python=X.Y python`. Cannot be \
+                customized for now.
+            I_dont_care_about_reproducibility: Whether you should be forced to commit and push \
+                your changes before submitting jobs. Things might break if unset, use at your peril.
+        """
         self._original_folder = folder  # save this argument that we'll modify.
 
         folder = PurePosixPath(folder)
@@ -240,11 +279,16 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         base_folder = get_first_id_independent_folder(folder)
         rest_of_folder = folder.relative_to(base_folder)
 
+        # Where we clone the repo on the cluster.
+        self.repo_dir_on_cluster = PurePosixPath(
+            repo_dir_on_cluster or (self.remote_home / "repos" / current_repo_name())
+        )
+
         self.local_base_folder = Path(base_folder).absolute()
         self.local_folder = Path(folder).absolute()
 
         # This is the folder where we store the pickle files on the remote.
-        self.remote_base_folder = self.remote_scratch / ".submitit" / base_folder
+        self.remote_base_folder = self.remote_scratch / base_folder
         self.remote_folder = self.remote_base_folder / rest_of_folder
 
         self.remote_dir_sync = RemoteDirSync(
@@ -256,12 +300,8 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         assert python is None, "TODO: Can't use something else than uv for now."
         self._uv_path: str = self.setup_uv()
         _python_version = ".".join(map(str, sys.version_info[:3]))
-        python = f"{self._uv_path} run --python={_python_version} python"
-
-        # try:
-        # Try without mounting.
-        # if not self.remote_dir_sync.is_mounted():
-        #     self.remote_dir_sync.mount()
+        offline = "--offline " if not self.internet_access_on_compute_nodes else ""
+        python = f"{self._uv_path} run {offline} --python={_python_version} python"
 
         super().__init__(
             folder=Path(folder), max_num_timeout=max_num_timeout, python=python
@@ -270,8 +310,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         assert self.folder == self.local_folder.absolute()
 
         # We create a git worktree on the remote, at that particular commit.
-        repo_dir_on_cluster = self.remote_home / "repos" / current_repo_name()
-        self.worktree_path = self.sync_source_code(repo_dir_on_cluster)
+        self.worktree_path = self.sync_source_code(self.repo_dir_on_cluster)
 
         if not self.internet_access_on_compute_nodes:
             self.predownload_dependencies()
@@ -339,8 +378,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         fn: Callable[[A], OutT],
         _a: Iterable[A],
         /,
-    ) -> list[core.Job[OutT]]:
-        ...
+    ) -> list[core.Job[OutT]]: ...
 
     @overload
     def map_array(
@@ -349,8 +387,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         _a: Iterable[A],
         _b: Iterable[B],
         /,
-    ) -> list[core.Job[OutT]]:
-        ...
+    ) -> list[core.Job[OutT]]: ...
 
     @overload
     def map_array(
@@ -360,8 +397,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         _b: Iterable[B],
         _c: Iterable[C],
         /,
-    ) -> list[core.Job[OutT]]:
-        ...
+    ) -> list[core.Job[OutT]]: ...
 
     @overload
     def map_array(
@@ -372,8 +408,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         _c: Iterable[C],
         _d: Iterable[D],
         /,
-    ) -> list[core.Job[OutT]]:
-        ...
+    ) -> list[core.Job[OutT]]: ...
 
     @overload
     def map_array(
@@ -385,8 +420,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         _d: Iterable[D],
         _e: Iterable[E],
         /,
-    ) -> list[core.Job[OutT]]:
-        ...
+    ) -> list[core.Job[OutT]]: ...
 
     def map_array(
         self, fn: Callable[..., OutT], *iterable: Iterable[Any]
@@ -818,7 +852,9 @@ def get_slurm_account(cluster: str) -> str:
         f"Fetching the list of SLURM accounts available on the {cluster} cluster."
     )
     result = LoginNode(cluster).run(
-        "sacctmgr --noheader show associations where user=$USER format=Account%50"
+        "sacctmgr --noheader show associations where user=$USER format=Account%50",
+        display=True,
+        hide=False,
     )
     accounts = [line.strip() for line in result.stdout.splitlines()]
     assert accounts
