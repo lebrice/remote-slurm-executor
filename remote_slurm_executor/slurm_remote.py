@@ -548,6 +548,10 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
     def _submit_command(self, command: str) -> RemoteSlurmJob:
         # Copied and adapted from PicklingExecutor.
+        # NOTE: Weird that this is a 'private' method in the base class, which is always called
+        # with the same argument. Is it this indented to be passed a different argument for testing?
+        # assert command == self._submitit_command_str
+
         tmp_uuid = uuid.uuid4().hex
 
         submission_file_path = (
