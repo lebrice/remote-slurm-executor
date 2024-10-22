@@ -299,9 +299,9 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # note: seems like we really need to specify the path to uv since `srun --pty uv` doesn't
         # work.
         self._uv_path: str = self.setup_uv()
-        _python_version = ".".join(map(str, sys.version_info[:3]))
+        self._python_version = ".".join(map(str, sys.version_info[:2]))
         offline = "--offline " if not self.internet_access_on_compute_nodes else ""
-        python = f"{self._uv_path} run {offline} --python={_python_version} python"
+        python = f"{self._uv_path} run {offline} --python={self._python_version} python"
 
         super().__init__(
             folder=Path(folder), max_num_timeout=max_num_timeout, python=python
@@ -309,8 +309,10 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # No need to make it absolute. Revert it back to a relative path?
         assert self.folder == self.local_folder.absolute()
 
+        self.sync_source_code()
         # We create a git worktree on the remote, at that particular commit.
-        self.worktree_path = self.sync_source_code()
+
+        self.worktree_path = self._make_worktree_in_home()
 
         if not self.internet_access_on_compute_nodes:
             self.predownload_dependencies()
@@ -321,9 +323,12 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             f"--chdir={self.worktree_path}"
         ]
         self.parameters.setdefault("stderr_to_stdout", True)
+
         self.parameters["setup"] = self.parameters.get("setup", []) + [
             f"# {cluster_hostname=}",
             "export UV_PYTHON_PREFERENCE='managed'",
+            # f"git clone {self.repo_dir_on_cluster} --branch {_current_commit()} $SLURM_TMPDIR/{_current_repo_name()}",
+            # f"cd $SLURM_TMPDIR/{_current_repo_name()}",
         ]
 
     def submit(
@@ -451,7 +456,9 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             "and available for the job later."
         )
         with self.login_node.chdir(self.worktree_path):
-            self.login_node.run(f"{self._uv_path} sync --all-extras --frozen")
+            self.login_node.run(
+                f"{self._uv_path} sync --python={self._python_version} --all-extras --frozen"
+            )
             # Remove the venv since we just want the dependencies to be downloaded to the cache)
             # self.login_node.run("rm -r .venv")
 
@@ -484,25 +491,14 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             # Else, fetch the latest changes:
             self.login_node.run(f"cd {repo_dir_on_cluster} && git fetch")
 
-        return self._make_worktree_in_home()
-
     def _make_worktree_in_home(self):
-        current_branch_name = LocalV2.get_output("git rev-parse --abbrev-ref HEAD")
-        current_commit = LocalV2.get_output("git rev-parse HEAD")
-
-        ref = (
-            current_branch_name
-            if self.I_dont_care_about_reproducibility
-            else current_commit
-        )
+        branch_name = _current_branch_name()
+        commit = _current_commit()
+        ref = branch_name if self.I_dont_care_about_reproducibility else commit
         repo_name = _current_repo_name()
 
         remote_worktree_path = (
-            self.remote_home
-            / "worktrees"
-            / repo_name
-            / current_branch_name
-            / current_commit
+            self.remote_home / "worktrees" / repo_name / branch_name / commit
         )
 
         if not self.login_node.dir_exists(remote_worktree_path):
@@ -853,11 +849,19 @@ class LoginNode(RemoteV2):
 
 
 def _current_repo_url():
-    return LocalV2.get_output("git config --get remote.origin.url")
+    return LocalV2.get_output("git config --get remote.origin.url", display=False)
 
 
 def _current_repo_name() -> str:
     return _current_repo_url().split("/")[-1].removesuffix(".git")
+
+
+def _current_branch_name():
+    return LocalV2.get_output("git rev-parse --abbrev-ref HEAD", display=False)
+
+
+def _current_commit():
+    return LocalV2.get_output("git rev-parse HEAD", display=False)
 
 
 @functools.lru_cache
