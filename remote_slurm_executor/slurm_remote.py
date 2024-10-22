@@ -513,12 +513,25 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         if not self.login_node.dir_exists(remote_worktree_path):
             self.login_node.run(f"mkdir -p {remote_worktree_path.parent}")
             # It might already be a registered worktree, repair it? or use --force?
-            self.login_node.run(
-                f"cd {self.repo_dir_on_cluster} && git worktree add --force {remote_worktree_path} {ref}"
-                # IDK what this "--lock" thing does, I'd like it to prevent users from modifying the code.
-                # Could also pass a reason for locking (if locking actually does what we want)
-                # '''--lock --reason "Please don't modify the code here. This is locked for reproducibility."'''
-            )
+            with self.login_node.chdir(self.repo_dir_on_cluster):
+                worktrees = [
+                    (
+                        _path := PurePosixPath((_parts := line.split())[0]),
+                        _ref := _parts[1],
+                    )
+                    for line in self.login_node.get_output(
+                        "git worktree list"
+                    ).splitlines()
+                ]
+                if (remote_worktree_path, ref) in worktrees:
+                    self.login_node.run(f"git worktree repair {remote_worktree_path}")
+                else:
+                    self.login_node.run(
+                        f"git worktree add {remote_worktree_path} {ref}"
+                        # IDK what this "--lock" thing does, I'd like it to prevent users from modifying the code.
+                        # Could also pass a reason for locking (if locking actually does what we want)
+                        # '''--lock --reason "Please don't modify the code here. This is locked for reproducibility."'''
+                    )
         return remote_worktree_path
 
     def setup_uv(self) -> str:
