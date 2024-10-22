@@ -132,16 +132,6 @@ class RemoteSlurmInfoWatcher(SlurmInfoWatcher):
         return ["ssh", self.cluster] + cmd
 
 
-def get_first_id_independent_folder(folder: PurePath | str) -> PurePosixPath:
-    """Returns the closest folder which is id independent."""
-    # This is different than in the `core.JobPaths.get_first_id_independent_folder` method:
-    # we don't try to resolve the path to be absolute since it might be a pure (remote) path.
-    parts = PurePath(folder).parts
-    tags = ["%j", "%t", "%A", "%a"]
-    indep_parts = itertools.takewhile(lambda x: not any(tag in x for tag in tags), parts)
-    return PurePosixPath(*indep_parts)
-
-
 class RemoteSlurmJob(core.Job[OutT]):
     _cancel_command = "scancel"
     watchers: ClassVar[dict[str, RemoteSlurmInfoWatcher]] = {}
@@ -221,7 +211,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
     - [ ] TODO: Add a tag like {cluster_name}-{job_id} to the commit once we know the job id?
     """
 
-    folder: PurePath
+    folder: Path
     """The output folder, for example, "logs/%j".
 
     NOTE: if `remote_folder` is unset, this must be a relative path.
@@ -353,7 +343,6 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         #     # within each srun context when working with multiple nodes?
         #     # + [f"--chdir={self.worktree_path}"]
         # )
-        _worktree_path = f"$SLURM_TMPDIR/{repo_name}-{commit_short}"
 
         # worktrees = [
         #     (_path := PurePosixPath((_parts := line.split())[0]), _ref := _parts[1])
@@ -363,20 +352,24 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # ]
         # worktree_doesnt_exist = commit_short not in [p[1] for p in worktrees]
 
+        _worktree_path = f"$SLURM_TMPDIR/{repo_name}-{commit_short}"
         self.parameters["setup"] = self.parameters.get("setup", []) + [
             f"### Added by the {type(self).__name__}",
             f"# {cluster_hostname=}",
             "export UV_PYTHON_PREFERENCE='managed'",
             "set -e  # Exit immediately if a command exits with a non-zero status.",
-            f"cd {self.repo_dir_on_cluster}",
             (
-                f"git worktree add {_worktree_path} {commit} --force --detach --lock "
-                '--reason="Locked for reproducibility: This code was used in job $SLURM_JOB_ID"'
+                f"git clone --depth 1 {repo_dir_on_cluster}@{commit} {_worktree_path}"
+                # f"git worktree add {_worktree_path} {commit} --force --force --detach --lock "
+                # '--reason="Locked for reproducibility: This code was used in job $SLURM_JOB_ID"'
                 # if worktree_doesnt_exist
-                # else ""
+                # MEGA HACK: https://stackoverflow.com/questions/42822869/how-can-i-recover-a-staged-changes-from-a-deleted-git-worktree
+                # mkdir -p {worktree_path}
+                # echo "gitdir: {repo_dir_on_cluster}/.git/worktrees/{worktree_name}" > {worktree_path}/.git
+                # gitdir: /home/mila/n/normandf/repos/remote-slurm-executor/.git/worktrees/remote-slurm-executor-1057174
+                # else f"git worktree repair {_worktree_path}"
             ),
             f"cd {_worktree_path}",
-            "uv sync --all-extras --locked",
             "###",
             # Trying out the idea of creating the venv in $SLURM_TMPDIR instead of in the worktree in $HOME.
         ]
@@ -399,18 +392,15 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         return job
 
     def process_submission(self, ds: DelayedSubmission[..., OutT]) -> RemoteSlurmJob[OutT]:
-        # NOTE: Expanded (copied) from the base class, just to understand what's going on.
-        eq_dict = self._equivalence_dict()
-        timeout_min = self.parameters.get(eq_dict["timeout_min"] if eq_dict else "timeout_min", 5)
+        # NOTE: Expanded (copied) from the base class, just to see what's going on.
+        timeout_min = self.parameters.get("time", 5)
         tmp_uuid = uuid.uuid4().hex
-        pickle_path = (
-            utils.JobPaths.get_first_id_independent_folder(self.folder) / f"{tmp_uuid}.pkl"
-        )
-        pickle_path.parent.mkdir(parents=True, exist_ok=True)
+        local_pickle_path = get_first_id_independent_folder(self.folder) / f"{tmp_uuid}.pkl"
+        local_pickle_path.parent.mkdir(parents=True, exist_ok=True)
         ds.set_timeout(timeout_min, self.max_num_timeout)
-        ds.dump(pickle_path)
+        ds.dump(local_pickle_path)
 
-        remote_pickle_path = self.remote_dir_sync.copy_to_remote(pickle_path)
+        remote_pickle_path = self.remote_dir_sync.copy_to_remote(local_pickle_path)
         # self.remote_dir_sync.sync_to_remote()
 
         self._throttle()
@@ -426,7 +416,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         self.login_node.run(f"mv {remote_pickle_path} {new_pickle_path}")
         # Also reflect this change locally?
         job.paths.submitted_pickle.parent.mkdir(exist_ok=True, parents=True)
-        pickle_path.rename(job.paths.submitted_pickle)
+        local_pickle_path.rename(job.paths.submitted_pickle)
 
         # self.remote_dir_sync.sync_to_remote()
         return job
@@ -857,6 +847,20 @@ class LoginNode(RemoteV2):
             warn=warn,
             hide=hide,
         )
+
+
+_Path = TypeVar("_Path", bound=PurePath)
+
+
+def get_first_id_independent_folder(folder: _Path) -> _Path:
+    """Returns the closest folder which is id independent."""
+    # This is different than in the `core.JobPaths.get_first_id_independent_folder` method:
+    # we don't try to resolve the path to be absolute since it might be a pure (remote) path.
+    tags = ["%j", "%t", "%A", "%a"]
+    indep_parts = itertools.takewhile(
+        lambda path_part: not any(tag in path_part for tag in tags), folder.parts
+    )
+    return type(folder)(*indep_parts)
 
 
 def _current_repo_url():
