@@ -758,17 +758,15 @@ class LoginNode(RemoteV2):
 
     @contextlib.contextmanager
     def chdir(self, remote_dir: PurePosixPath | str):
-        cd_command = f"cd {remote_dir}"
+        before = self.command_prefix
         if self.command_prefix:
-            added = f"&& {cd_command}"
+            self.command_prefix = f"{self.command_prefix} && cd {remote_dir} && "
         else:
-            added = cd_command
-
-        self.command_prefix += added
+            self.command_prefix = f"cd {remote_dir} && "
 
         yield
 
-        self.command_prefix = self.command_prefix.removesuffix(added)
+        self.command_prefix = before
 
     def cd(self, remote_dir: PurePosixPath | str):
         cd_command = f"cd {remote_dir}"
