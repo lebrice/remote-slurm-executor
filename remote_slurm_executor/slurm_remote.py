@@ -255,7 +255,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         repo_dir_on_cluster: PurePosixPath | str | None = None,
         internet_access_on_compute_nodes: bool = True,
         max_num_timeout: int = 3,
-        python: str | None = None,
+        python: str | None = f"uv run --python={CURRENT_PYTHON} python",
     ) -> None:
         """Create a new remote slurm executor."""
         self._original_folder = folder  # save this argument that we'll modify.
@@ -272,7 +272,8 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
                 / "repos"
                 / _current_repo_name()
             )
-        self.repo_dir_on_cluster = PurePosixPath(repo_dir_on_cluster)
+        repo_dir_on_cluster = PurePosixPath(repo_dir_on_cluster)
+        self.repo_dir_on_cluster = repo_dir_on_cluster
 
         # "base folder" := last part of `folder` that isn't dependent on the job id or task id (no
         # %j %t, %A, etc).
@@ -294,20 +295,15 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             remote_dir=self.remote_base_folder,
         )
 
-        assert python is None, "TODO: Can't customize the python command for now."
-
         super().__init__(folder=folder, max_num_timeout=max_num_timeout, python=python)
 
-        # Note: It seems like we really need to specify the full path to uv since `srun --pty uv` doesn't
-        # work.
-        uv_path: str = self.setup_uv()
-        _python_version = ".".join(map(str, sys.version_info[:2]))
+        # Note: It seems like we really need to specify the full path to uv since `srun --pty uv`
+        # doesn't work?
+        _uv_path: str = self.setup_uv()
         # todo: Is this --offline flag actually useful?
         # offline = "--offline " if not self.internet_access_on_compute_nodes else ""
-        self.python = f"{uv_path} run --python={_python_version} python"
-        sync_dependencies_command = (
-            f"{uv_path} sync --python={_python_version} --all-extras --frozen"
-        )
+        # self.python = f"{uv_path} run --python={CURRENT_PYTHON} python"
+        sync_dependencies_command = f"uv sync --python={CURRENT_PYTHON} --all-extras --frozen"
 
         repo_url = _current_repo_url()
         repo_name = _current_repo_name()
@@ -322,12 +318,12 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             commit=commit,
         )
 
-        if not self.internet_access_on_compute_nodes:
+        if not internet_access_on_compute_nodes:
             logger.info(
                 "Syncing the dependencies on the login node once, so that they are in the cache "
                 "and available for the job later."
             )
-            with login_node.chdir(self.repo_dir_on_cluster):
+            with login_node.chdir(repo_dir_on_cluster):
                 # Assume that we've already synced the code and the dependencies.
                 # IDEA: IF there is internet access on the compute nodes, then perhaps we could sync
                 # the dependencies on a compute node instead of on the login nodes?
@@ -356,10 +352,11 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         self.parameters["setup"] = self.parameters.get("setup", []) + [
             f"### Added by the {type(self).__name__}",
             f"# {cluster_hostname=}",
-            "export UV_PYTHON_PREFERENCE='managed'",
             "set -e  # Exit immediately if a command exits with a non-zero status.",
+            "export UV_PYTHON_PREFERENCE='managed'",
+            "source $HOME/.cargo/env  # Needed so we can run `uv` in a non-interactive job, apparently.",
             (
-                f"git clone --depth 1 {repo_dir_on_cluster}@{commit} {_worktree_path}"
+                f"git clone --branch {commit} -- {repo_dir_on_cluster}  {_worktree_path}"
                 # f"git worktree add {_worktree_path} {commit} --force --force --detach --lock "
                 # '--reason="Locked for reproducibility: This code was used in job $SLURM_JOB_ID"'
                 # if worktree_doesnt_exist
@@ -405,7 +402,9 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
         self._throttle()
         self._last_job_submitted = time.time()
-        job = self._submit_command(self._submitit_command_str)
+        # NOTE: Choosing to remove the submission file, instead of making it a symlink like in the
+        # base class.
+        job = self._submit_command(self._submitit_command_str, _keep_sbatch_file_as_symlink=False)
 
         # job.paths.move_temporary_file(pickle_path, "submitted_pickle")
         # job.paths.folder.mkdir(parents=True, exist_ok=True)
@@ -551,7 +550,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # return " ".join([self.python, "-u -m submitit.core._submit", shlex.quote(str(self.folder))])
         return f"{self.python} -u -m submitit.core._submit {shlex.quote(str(self.remote_folder))}"
 
-    def _submit_command(self, command: str) -> RemoteSlurmJob:
+    def _submit_command(self, command: str, _keep_sbatch_file_as_symlink=True) -> RemoteSlurmJob:
         # Copied and adapted from PicklingExecutor.
         # NOTE: Weird that this is a 'private' method in the base class, which is always called
         # with the same argument. Is it this indented to be passed a different argument for testing?
@@ -611,7 +610,8 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # TODO: Also reflect this locally?
         job.paths.submission_file.parent.mkdir(parents=True, exist_ok=True)
         submission_file_path.rename(job.paths.submission_file)
-        submission_file_path.symlink_to(job.paths.submission_file)
+        if _keep_sbatch_file_as_symlink:
+            submission_file_path.symlink_to(job.paths.submission_file)
 
         # TODO: The rest here isn't used? Seems to be meant for another executor
         # (maybe a conda-based executor (chronos?) internal to FAIR?) (hinted at
@@ -654,13 +654,14 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             internet_access_on_compute_nodes=self.internet_access_on_compute_nodes,
             max_num_timeout=self.max_num_timeout,
             python=None,
-            I_dont_care_about_reproducibility=self.I_dont_care_about_reproducibility,
         )
         array_ex.update_parameters(**self.parameters)
         array_ex.parameters["map_count"] = n
         self._throttle()
-
-        first_job: core.Job[tp.Any] = array_ex._submit_command(self._submitit_command_str)
+        # Maybe that's an example of a case where we want to keep the submission file as a symlink?
+        first_job: core.Job[tp.Any] = array_ex._submit_command(
+            self._submitit_command_str, _keep_sbatch_file_as_symlink=True
+        )
 
         tasks_ids = list(range(first_job.num_tasks))
         jobs = [
