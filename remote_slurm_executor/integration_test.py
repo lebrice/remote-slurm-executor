@@ -1,3 +1,4 @@
+import collections
 import logging
 from pathlib import PosixPath
 from typing import TypeVar
@@ -20,11 +21,23 @@ def add(a: T, b: T) -> T:
     return a + b
 
 
+cluster_has_internet = collections.defaultdict(
+    bool,
+    {
+        "mila": True,
+        "cedar": True,
+        "narval": False,
+        "beluga": False,
+    },
+)
+
+
 @pytest.fixture(
     params=[
         "mila",
         pytest.param("cedar", marks=pytest.mark.slow),
         pytest.param("narval", marks=pytest.mark.slow),
+        pytest.param("beluga", marks=pytest.mark.slow),
     ]
 )
 def cluster(request: pytest.FixtureRequest) -> str:
@@ -44,9 +57,9 @@ def test_autoexecutor(cluster: str):
     assert executor._executor.cluster_hostname == cluster
 
 
-@pytest.fixture(params=[True, False])
-def internet_on_compute_nodes(request: pytest.FixtureRequest) -> bool:
-    return getattr(request, "param", True)
+@pytest.fixture()
+def internet_on_compute_nodes(cluster: str, request: pytest.FixtureRequest) -> bool:
+    return getattr(request, "param", cluster_has_internet[cluster])
 
 
 @pytest.fixture()
@@ -70,15 +83,6 @@ def executor(cluster: str, internet_on_compute_nodes: bool):
         # executor.remote_dir_mount.unmount()
 
 
-@pytest.mark.parametrize(
-    ("cluster", "internet_on_compute_nodes"),
-    [
-        ("mila", True),
-        pytest.param("narval", False, marks=pytest.mark.slow),
-        pytest.param("cedar", True, marks=pytest.mark.slow),
-    ],
-    indirect=True,
-)
 def test_submit(executor: remote_slurm_executor.RemoteSlurmExecutor):
     job = executor.submit(add, 5, 7)  # will compute add(5, 7)
     print(job.job_id)  # ID of your job
@@ -91,15 +95,6 @@ def test_submit(executor: remote_slurm_executor.RemoteSlurmExecutor):
     print(output)
 
 
-@pytest.mark.parametrize(
-    ("cluster", "internet_on_compute_nodes"),
-    [
-        ("mila", True),
-        pytest.param("narval", False, marks=pytest.mark.slow),
-        pytest.param("cedar", True, marks=pytest.mark.slow),
-    ],
-    indirect=True,
-)
 def test_map_array(executor: remote_slurm_executor.RemoteSlurmExecutor):
     # You can also map a function on a list of arguments
     a = [1, 2, 3, 4]
@@ -113,15 +108,6 @@ def test_map_array(executor: remote_slurm_executor.RemoteSlurmExecutor):
     assert results == [a_i + b_i for a_i, b_i in zip(a, b)]
 
 
-@pytest.mark.parametrize(
-    ("cluster", "internet_on_compute_nodes"),
-    [
-        ("mila", True),
-        pytest.param("narval", False, marks=pytest.mark.slow),
-        pytest.param("cedar", True, marks=pytest.mark.slow),
-    ],
-    indirect=True,
-)
 def test_batch(executor: remote_slurm_executor.RemoteSlurmExecutor):
     A = [1, 2, 3, 4]
     B = [10, 20, 30, 40]
