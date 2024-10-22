@@ -502,7 +502,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
     def _make_worktree_in_home(self) -> PurePosixPath:
         branch_name = _current_branch_name()
-        commit = _current_commit()
+        commit = _current_commit_short()
         repo_name = _current_repo_name()
         ref = branch_name if self.I_dont_care_about_reproducibility else commit
 
@@ -512,8 +512,9 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
         if not self.login_node.dir_exists(remote_worktree_path):
             self.login_node.run(f"mkdir -p {remote_worktree_path.parent}")
+            # It might already be a registered worktree, repair it? or use --force?
             self.login_node.run(
-                f"cd {self.repo_dir_on_cluster} && git worktree add {remote_worktree_path} {ref}"
+                f"cd {self.repo_dir_on_cluster} && git worktree add --force {remote_worktree_path} {ref}"
                 # IDK what this "--lock" thing does, I'd like it to prevent users from modifying the code.
                 # Could also pass a reason for locking (if locking actually does what we want)
                 # '''--lock --reason "Please don't modify the code here. This is locked for reproducibility."'''
@@ -875,6 +876,10 @@ def _current_branch_name():
 
 def _current_commit():
     return LocalV2.get_output("git rev-parse HEAD", display=False)
+
+
+def _current_commit_short():
+    return LocalV2.get_output("git rev-parse --short HEAD", display=False)
 
 
 @functools.lru_cache
