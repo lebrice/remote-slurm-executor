@@ -50,7 +50,6 @@ def test_autoexecutor(cluster: str):
         folder=folder,  # todo: perhaps we can rename this folder?
         cluster="remoteslurm",
         remoteslurm_cluster_hostname=cluster,
-        # remoteslurm_I_dont_care_about_reproducibility=True,
     )
     assert isinstance(executor._executor, remote_slurm_executor.RemoteSlurmExecutor)
     assert executor._executor.folder == PosixPath(folder).absolute()
@@ -67,7 +66,6 @@ def executor(cluster: str, internet_on_compute_nodes: bool):
     executor = remote_slurm_executor.RemoteSlurmExecutor(
         folder="logs/%j",  # todo: perhaps we can rename this folder?
         cluster_hostname=cluster,
-        # I_dont_care_about_reproducibility=True,
         internet_access_on_compute_nodes=internet_on_compute_nodes,
     )
     # jobs shouldn't last more than 2-3 seconds, but adding more time

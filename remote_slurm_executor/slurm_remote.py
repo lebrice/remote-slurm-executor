@@ -230,7 +230,6 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         internet_access_on_compute_nodes: bool = True,
         max_num_timeout: int = 3,
         python: str | None = None,
-        I_dont_care_about_reproducibility: bool = False,
     ) -> None:
         """Create a new remote slurm executor.
 
@@ -256,7 +255,6 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         self.cluster_hostname = cluster_hostname
         self.login_node = LoginNode(self.cluster_hostname)
         self.internet_access_on_compute_nodes = internet_access_on_compute_nodes
-        self.I_dont_care_about_reproducibility = I_dont_care_about_reproducibility
 
         self.remote_home = PurePosixPath(self.login_node.get_output("echo $HOME"))
         self.remote_scratch = PurePosixPath(self.login_node.get_output("echo $SCRATCH"))
@@ -286,42 +284,52 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             remote_dir=self.remote_base_folder,
         )
 
-        assert python is None, "TODO: Can't use something else than uv for now."
-
-        # note: seems like we really need to specify the path to uv since `srun --pty uv` doesn't
-        # work.
-        self._uv_path: str = self.setup_uv()
-        self._python_version = ".".join(map(str, sys.version_info[:2]))
-        offline = "--offline " if not self.internet_access_on_compute_nodes else ""
-        python = f"{self._uv_path} run {offline} --python={self._python_version} python"
+        assert python is None, "TODO: Can't customize the python command for now."
 
         super().__init__(folder=Path(folder), max_num_timeout=max_num_timeout, python=python)
         # No need to make it absolute. Revert it back to a relative path?
         assert self.folder == self.local_folder.absolute()
 
-        # Force the user to make a commit, and sync the repo with the remote.
-        self.current_commit = self.sync_source_code()
+        # Note: It seems like we really need to specify the full path to uv since `srun --pty uv` doesn't
+        # work.
+        self._uv_path: str = self.setup_uv()
+        self._python_version = ".".join(map(str, sys.version_info[:2]))
+        offline = "--offline " if not self.internet_access_on_compute_nodes else ""
+        self.python = f"{self._uv_path} run {offline} --python={self._python_version} python"
 
-        # self.worktree_path: PurePosixPath | None = None
-        # We create a git worktree on the remote, at that particular commit.\
-        # TODO: Do we want to use a worktree?
-        self.worktree_path = self._make_worktree_in_home()
+        repo_name = _current_repo_name()
+        self.commit = _current_commit()
+        repo_url = _current_repo_url()
+
+        self.sync_source_code(
+            repo_dir_on_cluster=self.repo_dir_on_cluster,
+            repo_url=repo_url,
+            commit=self.commit,
+        )
 
         if not self.internet_access_on_compute_nodes:
-            self.predownload_dependencies()
+            self.predownload_dependencies(repo_dir_on_cluster=self.repo_dir_on_cluster)
 
-        # chdir to the repo so that `uv run` uses the dependencies, etc at that commit.
         # Note: Here we avoid mutating the passed in lists or dicts.
-        self.parameters["srun_args"] = self.parameters.get("srun_args", []) + (
-            [f"--chdir={self.worktree_path}"] if self.worktree_path else []
+        self.parameters["srun_args"] = (
+            self.parameters.get("srun_args", [])
+            # TODO: How do we --chdir to $SLURM_TMPDIR, since that might (in principle) be different
+            # within each srun context when working with multiple nodes?
+            # + [f"--chdir={self.worktree_path}"]
         )
         self.parameters.setdefault("stderr_to_stdout", True)
+
         self.parameters["setup"] = self.parameters.get("setup", []) + [
             f"# {cluster_hostname=}",
             "export UV_PYTHON_PREFERENCE='managed'",
+            f"cd {self.repo_dir_on_cluster}",
+            (
+                f"git worktree add $SLURM_TMPDIR/{repo_name} {self.commit} --locked "
+                "--reason='Locked for reproducibility purposes. This is the code that was used in job $SLURM_JOB_ID'"
+            ),
+            f"cd $SLURM_TMPDIR/{repo_name}",
+            "uv sync --all-extras --locked",
             # Trying out the idea of creating the venv in $SLURM_TMPDIR instead of in the worktree in $HOME.
-            # f"srun --ntasks-per-node=1 git clone {self.repo_dir_on_cluster} --branch {_current_commit()} $SLURM_TMPDIR/{_current_repo_name()}",
-            # f"cd $SLURM_TMPDIR/{_current_repo_name()}",
         ]
 
     def submit(
@@ -437,39 +445,38 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             return []
         return self._internal_process_submissions(submissions)
 
-    def predownload_dependencies(self):
+    def predownload_dependencies(self, repo_dir_on_cluster: PurePosixPath):
         logger.info(
             "Syncing the dependencies on the login node once, so that they are in the cache "
             "and available for the job later."
         )
-        with self.login_node.chdir(self.worktree_path or self.repo_dir_on_cluster):
+        with self.login_node.chdir(repo_dir_on_cluster):
+            # Assume that we've already synced the code and the dependencies.
             self.login_node.run(
-                f"{self._uv_path} sync --python={self._python_version} --all-extras --frozen"
+                f"{self._uv_path} sync --python={self._python_version} --all-extras --frozen",
+                display=True,
             )
-            # Remove the venv since we just want the dependencies to be downloaded to the cache)
-            self.login_node.run("rm -r .venv")
+            # NOTE: We could also remove the venv since we mainly want the dependencies to be downloaded
+            # to the cache.
+            # self.login_node.run("rm -r .venv")
 
         # IDEA: IF there is internet access on the compute nodes, then perhaps we could sync the
         # dependencies on a compute node instead of on the login nodes?
 
-    def sync_source_code(self):
+    def sync_source_code(self, repo_dir_on_cluster: PurePosixPath, repo_url: str, commit: str):
         """Sync the local source code with the remote cluster."""
-        repo_dir_on_cluster = self.repo_dir_on_cluster
 
-        if not self.I_dont_care_about_reproducibility:
-            if LocalV2.get_output("git status --porcelain"):
-                console.print(
-                    "You have uncommitted changes, please commit and push them before re-running the command.\n"
-                    "(This is necessary in order to sync local code with the remote cluster, and is also a good "
-                    "practice for reproducibility.)",
-                    style="orange3",  # Why the hell isn't 'orange' a colour?!
-                )
-                exit(1)
-            # Local git repo is clean, push HEAD to the remote.
-            LocalV2.run("git push", display=True)
-
-        repo_url = _current_repo_url()
-        current_commit = _current_commit()
+        if uncommitted_changes := LocalV2.get_output("git status --porcelain"):
+            console.log(
+                UserWarning(
+                    "You have uncommitted changes! Please consider adding and committing them before re-running the command.\n"
+                    "(This the best way to guarantee that the same code will be used on the remote cluster "
+                    "and helps make your experiments easier to reproduce in the future.)\n"
+                    "Uncommitted changes:\n" + uncommitted_changes
+                ),
+                style="orange3",  # Why the hell isn't 'orange' a colour?!
+            )
+        LocalV2.run("git push", display=True)
 
         # If the repo doesn't exist on the remote, clone it:
         if not self.login_node.dir_exists(repo_dir_on_cluster):
@@ -479,17 +486,16 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
                 display=True,
             )
 
-        # In any case, fetch the latest changes on the remote.
+        # In any case, fetch the latest changes on the remote and checkout that commit.
         with self.login_node.chdir(repo_dir_on_cluster):
-            self.login_node.run("git fetch")
-            # self.login_node.run(f"git checkout {_current_commit()}")
-        return current_commit
+            self.login_node.run("git fetch", display=True)
+            self.login_node.run(f"git checkout {commit}", display=True)
 
     def _make_worktree_in_home(self) -> PurePosixPath:
         branch_name = _current_branch_name()
         commit = _current_commit_short()
         repo_name = _current_repo_name()
-        ref = branch_name if self.I_dont_care_about_reproducibility else commit
+        ref = commit
         remote_worktree_path = self.remote_home / "worktrees" / repo_name / branch_name / commit
 
         if not self.login_node.dir_exists(remote_worktree_path):
