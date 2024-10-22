@@ -355,8 +355,10 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         self.parameters["setup"] = self.parameters.get("setup", []) + [
             f"### Added by the {type(self).__name__}",
             f"# {cluster_hostname=}",
+            # TODO: Would love to set this, but the --link-mode raises an error below.
             "set -e  # Exit immediately if a command exits with a non-zero status.",
             "export UV_PYTHON_PREFERENCE='managed'  # Prefer using the python managed by uv over the system's python.",
+            "export UV_LINK_MODE='copy'  # Don't quit the job if we can't use hardlinks from the cache.",
             "source $HOME/.cargo/env  # Needed so we can run `uv` in a non-interactive job, apparently.",
             (
                 f"git clone {repo_dir_on_cluster} {_worktree_path}"
