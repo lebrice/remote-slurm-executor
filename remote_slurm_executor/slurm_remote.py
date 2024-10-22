@@ -15,15 +15,13 @@ import time
 import typing as tp
 import uuid
 import warnings
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath
 from typing import (
     Any,
-    Callable,
     ClassVar,
     Generic,
-    Iterable,
-    Mapping,
     ParamSpec,
     TypeVar,
     overload,
@@ -126,7 +124,7 @@ class RemoteSlurmInfoWatcher(SlurmInfoWatcher):
         super().__init__(delay_s)
         self.cluster = cluster
 
-    def _make_command(self) -> tp.Optional[tp.List[str]]:
+    def _make_command(self) -> list[str] | None:
         # asking for array id will return all status
         # on the other end, asking for each and every one of them individually takes a huge amount of time
         cmd = super()._make_command()
@@ -135,8 +133,8 @@ class RemoteSlurmInfoWatcher(SlurmInfoWatcher):
         return ["ssh", self.cluster] + cmd
 
 
-def get_first_id_independent_folder(folder: tp.Union[PurePath, str]) -> PurePosixPath:
-    """Returns the closest folder which is id independent"""
+def get_first_id_independent_folder(folder: PurePath | str) -> PurePosixPath:
+    """Returns the closest folder which is id independent."""
     parts = PurePath(folder).parts
     tags = ["%j", "%t", "%A", "%a"]
     indep_parts = itertools.takewhile(
@@ -153,7 +151,7 @@ class RemoteSlurmJob(core.Job[OutT]):
     def __init__(
         self,
         cluster: str,
-        folder: tp.Union[str, Path],
+        folder: str | Path,
         job_id: str,
         remote_dir_sync: RemoteDirSync,
         tasks: tp.Sequence[int] = (0,),
@@ -240,7 +238,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         python: str | None = None,
         I_dont_care_about_reproducibility: bool = False,
     ) -> None:
-        """ Create a new remote slurm executor.
+        """Create a new remote slurm executor.
 
         Args:
             folder: The output folder (same idea as the base class)
@@ -338,7 +336,6 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         self, fn: Callable[P, OutT], *args: P.args, **kwargs: P.kwargs
     ) -> core.DelayedJob[OutT] | RemoteSlurmJob[OutT]:
         ds = DelayedSubmission(fn, *args, **kwargs)
-        super().submit
         if self._delayed_batch is not None:
             job: core.Job[OutT] = core.DelayedJob(self)
             self._delayed_batch.append((job, ds))
@@ -354,7 +351,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
     def process_submission(
         self, ds: DelayedSubmission[..., OutT]
     ) -> RemoteSlurmJob[OutT]:
-        # NOTE: Expanded (copied) from the base class, just to understand whats going on.
+        # NOTE: Expanded (copied) from the base class, just to understand what's going on.
         eq_dict = self._equivalence_dict()
         timeout_min = self.parameters.get(
             eq_dict["timeout_min"] if eq_dict else "timeout_min", 5
@@ -505,7 +502,6 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         commit = _current_commit_short()
         repo_name = _current_repo_name()
         ref = branch_name if self.I_dont_care_about_reproducibility else commit
-
         remote_worktree_path = (
             self.remote_home / "worktrees" / repo_name / branch_name / commit
         )
@@ -738,7 +734,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         tasks_per_node: int = max(1, self.parameters.get("ntasks_per_node", 1))
         return nodes * tasks_per_node
 
-    def _make_submission_command(self, submission_file_path: PurePath) -> tp.List[str]:
+    def _make_submission_command(self, submission_file_path: PurePath) -> list[str]:
         return [
             "ssh",
             self.cluster_hostname,

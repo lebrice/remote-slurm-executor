@@ -50,7 +50,7 @@ def test_autoexecutor(cluster: str):
         folder=folder,  # todo: perhaps we can rename this folder?
         cluster="remoteslurm",
         remoteslurm_cluster_hostname=cluster,
-        remoteslurm_I_dont_care_about_reproducibility=True,
+        # remoteslurm_I_dont_care_about_reproducibility=True,
     )
     assert isinstance(executor._executor, remote_slurm_executor.RemoteSlurmExecutor)
     assert executor._executor.folder == PosixPath(folder).absolute()
