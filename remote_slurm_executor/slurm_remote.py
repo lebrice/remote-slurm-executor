@@ -73,9 +73,7 @@ class RemoteDirSync:
         return local_path
 
     def _get_remote_path(self, local_path: Path) -> PurePosixPath:
-        return self.remote_dir / (
-            local_path.absolute().relative_to(self.local_dir.absolute())
-        )
+        return self.remote_dir / (local_path.absolute().relative_to(self.local_dir.absolute()))
 
     def _get_local_path(self, remote_path: PurePosixPath) -> Path:
         return self.local_dir / (remote_path.relative_to(self.remote_dir))
@@ -137,9 +135,7 @@ def get_first_id_independent_folder(folder: PurePath | str) -> PurePosixPath:
     """Returns the closest folder which is id independent."""
     parts = PurePath(folder).parts
     tags = ["%j", "%t", "%A", "%a"]
-    indep_parts = itertools.takewhile(
-        lambda x: not any(tag in x for tag in tags), parts
-    )
+    indep_parts = itertools.takewhile(lambda x: not any(tag in x for tag in tags), parts)
     return PurePosixPath(*indep_parts)
 
 
@@ -202,9 +198,7 @@ class DelayedSubmission(utils.DelayedSubmission, Generic[P, OutT]):
     args: tuple
     kwargs: Mapping
 
-    def __init__(
-        self, function: Callable[P, OutT], *args: P.args, **kwargs: P.kwargs
-    ) -> None:
+    def __init__(self, function: Callable[P, OutT], *args: P.args, **kwargs: P.kwargs) -> None:
         super().__init__(function, *args, **kwargs)
 
     def result(self) -> OutT:
@@ -301,9 +295,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         offline = "--offline " if not self.internet_access_on_compute_nodes else ""
         python = f"{self._uv_path} run {offline} --python={self._python_version} python"
 
-        super().__init__(
-            folder=Path(folder), max_num_timeout=max_num_timeout, python=python
-        )
+        super().__init__(folder=Path(folder), max_num_timeout=max_num_timeout, python=python)
         # No need to make it absolute. Revert it back to a relative path?
         assert self.folder == self.local_folder.absolute()
 
@@ -348,18 +340,13 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             )
         return job
 
-    def process_submission(
-        self, ds: DelayedSubmission[..., OutT]
-    ) -> RemoteSlurmJob[OutT]:
+    def process_submission(self, ds: DelayedSubmission[..., OutT]) -> RemoteSlurmJob[OutT]:
         # NOTE: Expanded (copied) from the base class, just to understand what's going on.
         eq_dict = self._equivalence_dict()
-        timeout_min = self.parameters.get(
-            eq_dict["timeout_min"] if eq_dict else "timeout_min", 5
-        )
+        timeout_min = self.parameters.get(eq_dict["timeout_min"] if eq_dict else "timeout_min", 5)
         tmp_uuid = uuid.uuid4().hex
         pickle_path = (
-            utils.JobPaths.get_first_id_independent_folder(self.folder)
-            / f"{tmp_uuid}.pkl"
+            utils.JobPaths.get_first_id_independent_folder(self.folder) / f"{tmp_uuid}.pkl"
         )
         pickle_path.parent.mkdir(parents=True, exist_ok=True)
         ds.set_timeout(timeout_min, self.max_num_timeout)
@@ -488,12 +475,12 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         if not self.login_node.dir_exists(repo_dir_on_cluster):
             self.login_node.run(f"mkdir -p {repo_dir_on_cluster.parent}")
             self.login_node.run(
-                f"git clone {repo_url} --branch {current_commit} {repo_dir_on_cluster}",
+                f"git clone {repo_url} {repo_dir_on_cluster}",
                 display=True,
             )
-        else:
-            # Else, fetch the latest changes:
-            self.login_node.run(f"cd {repo_dir_on_cluster} && git fetch")
+
+        # In any case, fetch the latest changes on the remote.
+        self.login_node.run(f"cd {repo_dir_on_cluster} && git fetch")
 
         return current_commit
 
@@ -502,9 +489,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         commit = _current_commit_short()
         repo_name = _current_repo_name()
         ref = branch_name if self.I_dont_care_about_reproducibility else commit
-        remote_worktree_path = (
-            self.remote_home / "worktrees" / repo_name / branch_name / commit
-        )
+        remote_worktree_path = self.remote_home / "worktrees" / repo_name / branch_name / commit
 
         if not self.login_node.dir_exists(remote_worktree_path):
             self.login_node.run(f"mkdir -p {remote_worktree_path.parent}")
@@ -515,9 +500,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
                         _path := PurePosixPath((_parts := line.split())[0]),
                         _ref := _parts[1],
                     )
-                    for line in self.login_node.get_output(
-                        "git worktree list"
-                    ).splitlines()
+                    for line in self.login_node.get_output("git worktree list").splitlines()
                 ]
                 if (remote_worktree_path, ref) in worktrees:
                     self.login_node.run(f"git worktree repair {remote_worktree_path}")
@@ -532,17 +515,13 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
     def setup_uv(self) -> str:
         if not (uv_path := self._get_uv_path()):
-            logger.info(
-                f"Setting up [uv](https://docs.astral.sh/uv/) on {self.cluster_hostname}"
-            )
+            logger.info(f"Setting up [uv](https://docs.astral.sh/uv/) on {self.cluster_hostname}")
             self.login_node.run(
                 "curl -LsSf https://astral.sh/uv/install.sh | sh && source ~/.cargo/env"
             )
             uv_path = self._get_uv_path()
             if uv_path is None:
-                raise RuntimeError(
-                    f"Unable to setup `uv` on the {self.cluster_hostname} cluster!"
-                )
+                raise RuntimeError(f"Unable to setup `uv` on the {self.cluster_hostname} cluster!")
         return uv_path
 
     def _get_uv_path(self) -> str | None:
@@ -580,9 +559,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         with submission_file_path.open("w") as f:
             f.write(self._make_submission_file_text(command, tmp_uuid))
 
-        submission_file_on_remote = self.remote_dir_sync.copy_to_remote(
-            submission_file_path
-        )
+        submission_file_on_remote = self.remote_dir_sync.copy_to_remote(submission_file_path)
 
         command_list = self._make_submission_command(submission_file_on_remote)
         # run the sbatch command.
@@ -676,9 +653,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         array_ex.parameters["map_count"] = n
         self._throttle()
 
-        first_job: core.Job[tp.Any] = array_ex._submit_command(
-            self._submitit_command_str
-        )
+        first_job: core.Job[tp.Any] = array_ex._submit_command(self._submitit_command_str)
 
         tasks_ids = list(range(first_job.num_tasks))
         jobs = [
@@ -699,9 +674,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
             remote_pickle_path = self.remote_dir_sync.copy_to_remote(local_pickle_path)
 
-            self.login_node.run(
-                f"mkdir -p {_get_remote_path(job.paths.folder)}", display=False
-            )
+            self.login_node.run(f"mkdir -p {_get_remote_path(job.paths.folder)}", display=False)
             self.login_node.run(
                 f"mv {remote_pickle_path} {_get_remote_path(job.paths.submitted_pickle)}",
                 display=False,
@@ -725,9 +698,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # Note: annoying, but seems like `srun_args` is fed through shlex.quote or
         # something, which causes issues with the evaluation of variables.
         chdir_to_worktree = "--chdir=$WORKTREE_LOCATION"
-        return content_with_remote_paths.replace(
-            f"'{chdir_to_worktree}'", chdir_to_worktree
-        )
+        return content_with_remote_paths.replace(f"'{chdir_to_worktree}'", chdir_to_worktree)
 
     def _num_tasks(self) -> int:
         nodes: int = self.parameters.get("nodes", 1)
@@ -910,9 +881,7 @@ def get_slurm_account(cluster: str) -> str:
     rrg-someprofessor_gpu  <-- this one is used.
     ```
     """
-    logger.info(
-        f"Fetching the list of SLURM accounts available on the {cluster} cluster."
-    )
+    logger.info(f"Fetching the list of SLURM accounts available on the {cluster} cluster.")
     result = LoginNode(cluster).run(
         "sacctmgr --noheader show associations where user=$USER format=Account%50",
         display=True,
