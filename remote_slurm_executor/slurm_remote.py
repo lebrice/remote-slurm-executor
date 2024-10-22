@@ -370,7 +370,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             "set -e  # Exit immediately if a command exits with a non-zero status.",
             f"cd {self.repo_dir_on_cluster}",
             (
-                f"git worktree add {_worktree_path} {commit} --force --detached --lock "
+                f"git worktree add {_worktree_path} {commit} --force --detach --lock "
                 '--reason="Locked for reproducibility: This code was used in job $SLURM_JOB_ID"'
                 # if worktree_doesnt_exist
                 # else ""
