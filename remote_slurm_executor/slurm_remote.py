@@ -4,6 +4,7 @@
 # LICENSE file in the root directory of this source tree.
 #
 import contextlib
+import dataclasses
 import functools
 import itertools
 import logging
@@ -725,16 +726,20 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # return -1 if shutil.which("srun") is None else 2
 
 
+@dataclasses.dataclass(init=False)
 class LoginNode(RemoteV2):
     # Tiny improvements / changes to the RemoteV2 class from milatools.
+
+    command_prefix: str = ""
+
     def __init__(
         self,
         hostname: str,
         *,
         control_path: Path | None = None,
         ssh_config_path: Path = SSH_CONFIG_FILE,
-        command_prefix: str = "",
         _start_control_socket: bool = True,
+        command_prefix: str = "",
     ):
         super().__init__(
             hostname,
