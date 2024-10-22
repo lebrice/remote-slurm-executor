@@ -222,6 +222,8 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
     - [ ] Unable to launch jobs from the `master` branch of a repo, because we try to create a
           worktree and the branch is already checked out in the cloned repo!
     - [ ] Having issues on narval where the venv can't be created?
+    - [ ] TODO: Make a worktree in /tmp on the compute node instead?
+    - [ ] TODO: Add a tag like {cluster_name}-{job_id} to the commit once we know the job id?
     """
 
     job_class: ClassVar[type[RemoteSlurmJob]] = RemoteSlurmJob
@@ -271,7 +273,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
         # Where we clone the repo on the cluster.
         self.repo_dir_on_cluster = PurePosixPath(
-            repo_dir_on_cluster or (self.remote_home / "repos" / current_repo_name())
+            repo_dir_on_cluster or (self.remote_home / "repos" / _current_repo_name())
         )
 
         # "base" folder := dir without any %j %t, %A, etc.
@@ -307,7 +309,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         assert self.folder == self.local_folder.absolute()
 
         # We create a git worktree on the remote, at that particular commit.
-        self.worktree_path = self.sync_source_code(self.repo_dir_on_cluster)
+        self.worktree_path = self.sync_source_code()
 
         if not self.internet_access_on_compute_nodes:
             self.predownload_dependencies()
@@ -320,6 +322,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         self.parameters.setdefault("stderr_to_stdout", True)
         self.parameters["setup"] = self.parameters.get("setup", []) + [
             f"# {cluster_hostname=}",
+            "export UV_PYTHON_PREFERENCE='managed'",
         ]
 
     def submit(
@@ -454,8 +457,9 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # IDEA: IF there is internet access on the compute nodes, then perhaps we could sync the
         # dependencies on a compute node instead of on the login nodes?
 
-    def sync_source_code(self, repo_dir_on_cluster: PurePosixPath) -> PurePosixPath:
+    def sync_source_code(self):
         """Sync the local source code with the remote cluster."""
+        repo_dir_on_cluster = self.repo_dir_on_cluster
 
         if not self.I_dont_care_about_reproducibility:
             if LocalV2.get_output("git status --porcelain"):
@@ -469,17 +473,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             # Local git repo is clean, push HEAD to the remote.
             LocalV2.run("git push")
 
-        current_branch_name = LocalV2.get_output("git rev-parse --abbrev-ref HEAD")
-        current_commit = LocalV2.get_output("git rev-parse HEAD")
-
-        ref = (
-            current_branch_name
-            if self.I_dont_care_about_reproducibility
-            else current_commit
-        )
-
-        repo_url = LocalV2.get_output("git config --get remote.origin.url")
-        repo_name = repo_url.split("/")[-1].removesuffix(".git")
+        repo_url = _current_repo_url()
 
         # If the repo doesn't exist on the remote, clone it:
         if not self.login_node.dir_exists(repo_dir_on_cluster):
@@ -489,12 +483,25 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             # Else, fetch the latest changes:
             self.login_node.run(f"cd {repo_dir_on_cluster} && git fetch")
 
+        return self._make_worktree_in_home()
+
+    def _make_worktree_in_home(self):
+        current_branch_name = LocalV2.get_output("git rev-parse --abbrev-ref HEAD")
+        current_commit = LocalV2.get_output("git rev-parse HEAD")
+
+        ref = (
+            current_branch_name
+            if self.I_dont_care_about_reproducibility
+            else current_commit
+        )
+        repo_name = _current_repo_name()
+
         remote_worktree_path = self.remote_home / "worktrees" / f"{repo_name}-{ref}"
 
         if not self.login_node.dir_exists(remote_worktree_path):
             self.login_node.run(f"mkdir -p {remote_worktree_path.parent}")
             self.login_node.run(
-                f"cd {repo_dir_on_cluster} && git worktree add {remote_worktree_path} {ref}"
+                f"cd {self.repo_dir_on_cluster} && git worktree add {remote_worktree_path} {ref}"
                 # IDK what this "--lock" thing does, I'd like it to prevent users from modifying the code.
                 # Could also pass a reason for locking (if locking actually does what we want)
                 # '''--lock --reason "Please don't modify the code here. This is locked for reproducibility."'''
@@ -834,9 +841,12 @@ class LoginNode(RemoteV2):
         )
 
 
-def current_repo_name() -> str:
-    repo_url = LocalV2.get_output("git config --get remote.origin.url")
-    return repo_url.split("/")[-1]
+def _current_repo_url():
+    return LocalV2.get_output("git config --get remote.origin.url")
+
+
+def _current_repo_name() -> str:
+    return _current_repo_url().split("/")[-1].removesuffix(".git")
 
 
 @functools.lru_cache
