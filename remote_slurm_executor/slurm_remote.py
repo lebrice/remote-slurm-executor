@@ -188,9 +188,13 @@ class RemoteSlurmJob(core.Job[OutT]):
     def wait(self) -> None:
         super().wait()
         logger.info(f"Copying folder {self.paths.folder} from the remote.")
-        self.remote_dir_sync.get_from_remote(local_path=self.paths.folder)
-        self.remote_dir_sync.get_from_remote(local_path=self.paths.stdout)
-        self.remote_dir_sync.get_from_remote(local_path=self.paths.result_pickle)
+        # self.remote_dir_sync.get_from_remote(local_path=self.paths.folder)
+        self.remote_dir_sync.login_node.local_runner.run(
+            f"rsync --recursive --links --safe-links --update --verbose "
+            f"{self.remote_dir_sync.login_node.hostname}:{self.remote_dir_sync._get_remote_path(self.paths.folder)} {self.paths.folder.parent}"
+        )
+        # self.remote_dir_sync.get_from_remote(local_path=self.paths.stdout)
+        # self.remote_dir_sync.get_from_remote(local_path=self.paths.result_pickle)
 
 
 @dataclass(init=False)
