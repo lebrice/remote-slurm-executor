@@ -379,7 +379,8 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         fn: Callable[[A], OutT],
         _a: Iterable[A],
         /,
-    ) -> list[core.Job[OutT]]: ...
+    ) -> list[core.Job[OutT]]:
+        ...
 
     @overload
     def map_array(
@@ -388,7 +389,8 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         _a: Iterable[A],
         _b: Iterable[B],
         /,
-    ) -> list[core.Job[OutT]]: ...
+    ) -> list[core.Job[OutT]]:
+        ...
 
     @overload
     def map_array(
@@ -398,7 +400,8 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         _b: Iterable[B],
         _c: Iterable[C],
         /,
-    ) -> list[core.Job[OutT]]: ...
+    ) -> list[core.Job[OutT]]:
+        ...
 
     @overload
     def map_array(
@@ -409,7 +412,8 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         _c: Iterable[C],
         _d: Iterable[D],
         /,
-    ) -> list[core.Job[OutT]]: ...
+    ) -> list[core.Job[OutT]]:
+        ...
 
     @overload
     def map_array(
@@ -421,7 +425,8 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         _d: Iterable[D],
         _e: Iterable[E],
         /,
-    ) -> list[core.Job[OutT]]: ...
+    ) -> list[core.Job[OutT]]:
+        ...
 
     def map_array(
         self, fn: Callable[..., OutT], *iterable: Iterable[Any]
@@ -438,7 +443,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             "and available for the job later."
         )
         with self.login_node.chdir(self.worktree_path):
-            self.login_node.run(f"{self._uv_path} sync --offline --all-extras --frozen")
+            self.login_node.run(f"{self._uv_path} sync --all-extras --frozen")
             # Remove the venv since we just want the dependencies to be downloaded to the cache)
             # self.login_node.run("rm -r .venv")
 
