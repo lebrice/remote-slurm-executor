@@ -70,6 +70,9 @@ def executor(cluster: str, internet_on_compute_nodes: bool):
         # I_dont_care_about_reproducibility=True,
         internet_access_on_compute_nodes=internet_on_compute_nodes,
     )
+    # jobs shouldn't last more than 2-3 seconds, but adding more time
+    # in case the filesystem is misbehaving.
+    executor.update_parameters(time="00:00:30")
 
     if cluster != "mila":
         executor.update_parameters(account=get_slurm_account(cluster))

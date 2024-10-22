@@ -309,9 +309,12 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # No need to make it absolute. Revert it back to a relative path?
         assert self.folder == self.local_folder.absolute()
 
-        self.sync_source_code()
-        # We create a git worktree on the remote, at that particular commit.
+        # Force the user to make a commit, and sync the repo with the remote.
+        self.current_commit = self.sync_source_code()
 
+        # self.worktree_path: PurePosixPath | None = None
+        # We create a git worktree on the remote, at that particular commit.\
+        # TODO: Do we want to use a worktree?
         self.worktree_path = self._make_worktree_in_home()
 
         if not self.internet_access_on_compute_nodes:
@@ -319,15 +322,15 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
         # chdir to the repo so that `uv run` uses the dependencies, etc at that commit.
         # Note: Here we avoid mutating the passed in lists or dicts.
-        self.parameters["srun_args"] = self.parameters.get("srun_args", []) + [
-            f"--chdir={self.worktree_path}"
-        ]
+        self.parameters["srun_args"] = self.parameters.get("srun_args", []) + (
+            [f"--chdir={self.worktree_path}"] if self.worktree_path else []
+        )
         self.parameters.setdefault("stderr_to_stdout", True)
-
         self.parameters["setup"] = self.parameters.get("setup", []) + [
             f"# {cluster_hostname=}",
             "export UV_PYTHON_PREFERENCE='managed'",
-            # f"git clone {self.repo_dir_on_cluster} --branch {_current_commit()} $SLURM_TMPDIR/{_current_repo_name()}",
+            # Trying out the idea of creating the venv in $SLURM_TMPDIR instead of in the worktree in $HOME.
+            # f"srun --ntasks-per-node=1 git clone {self.repo_dir_on_cluster} --branch {_current_commit()} $SLURM_TMPDIR/{_current_repo_name()}",
             # f"cd $SLURM_TMPDIR/{_current_repo_name()}",
         ]
 
@@ -455,12 +458,12 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             "Syncing the dependencies on the login node once, so that they are in the cache "
             "and available for the job later."
         )
-        with self.login_node.chdir(self.worktree_path):
+        with self.login_node.chdir(self.worktree_path or self.repo_dir_on_cluster):
             self.login_node.run(
                 f"{self._uv_path} sync --python={self._python_version} --all-extras --frozen"
             )
             # Remove the venv since we just want the dependencies to be downloaded to the cache)
-            # self.login_node.run("rm -r .venv")
+            self.login_node.run("rm -r .venv")
 
         # IDEA: IF there is internet access on the compute nodes, then perhaps we could sync the
         # dependencies on a compute node instead of on the login nodes?
@@ -479,23 +482,29 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
                 )
                 exit(1)
             # Local git repo is clean, push HEAD to the remote.
-            LocalV2.run("git push")
+            LocalV2.run("git push", display=True)
 
         repo_url = _current_repo_url()
+        current_commit = _current_commit()
 
         # If the repo doesn't exist on the remote, clone it:
         if not self.login_node.dir_exists(repo_dir_on_cluster):
             self.login_node.run(f"mkdir -p {repo_dir_on_cluster.parent}")
-            self.login_node.run(f"git clone {repo_url} {repo_dir_on_cluster}")
+            self.login_node.run(
+                f"git clone {repo_url} --branch {current_commit} {repo_dir_on_cluster}",
+                display=True,
+            )
         else:
             # Else, fetch the latest changes:
             self.login_node.run(f"cd {repo_dir_on_cluster} && git fetch")
 
-    def _make_worktree_in_home(self):
+        return current_commit
+
+    def _make_worktree_in_home(self) -> PurePosixPath:
         branch_name = _current_branch_name()
         commit = _current_commit()
-        ref = branch_name if self.I_dont_care_about_reproducibility else commit
         repo_name = _current_repo_name()
+        ref = branch_name if self.I_dont_care_about_reproducibility else commit
 
         remote_worktree_path = (
             self.remote_home / "worktrees" / repo_name / branch_name / commit
