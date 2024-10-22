@@ -208,6 +208,7 @@ class DelayedSubmission(utils.DelayedSubmission, Generic[P, OutT]):
         return super().result()
 
 
+@dataclasses.dataclass(init=False)
 class RemoteSlurmExecutor(slurm.SlurmExecutor):
     """Executor for a remote SLURM cluster.
 
@@ -217,9 +218,40 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
     ## TODOs:
     - [ ] Unable to launch jobs from the `master` branch of a repo, because we try to create a
           worktree and the branch is already checked out in the cloned repo!
-    - [ ] Having issues on narval where the venv can't be created?
-    - [ ] TODO: Make a worktree in /tmp on the compute node instead?
     - [ ] TODO: Add a tag like {cluster_name}-{job_id} to the commit once we know the job id?
+    """
+
+    folder: PurePath
+    """The output folder, for example, "logs/%j".
+
+    NOTE: if `remote_folder` is unset, this must be a relative path.
+    """
+
+    cluster_hostname: str
+    """Hostname of the cluster to connect to."""
+
+    remote_folder: PurePosixPath
+    """Where `folder` will be mirrored on the remote cluster.
+
+    Set to "$SCRATCH/`folder`" by default.
+    """
+
+    repo_dir_on_cluster: PurePosixPath
+    """The directory on the cluster where the repo is cloned.
+
+    If not passed, the repo is cloned in `$HOME/repos/<repo_name>`.
+    """
+
+    internet_access_on_compute_nodes: bool = True
+    """Whether compute nodes on that cluster have access to the internet."""
+
+    max_num_timeout: int = 3
+    """Maximum number of job timeouts before giving up (from the base class)."""
+
+    python: str | None = None
+    """Python command.
+
+    Defaults to `uv run --python=X.Y python`. Cannot be customized for now.
     """
 
     job_class: ClassVar[type[RemoteSlurmJob]] = RemoteSlurmJob
@@ -235,23 +267,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         max_num_timeout: int = 3,
         python: str | None = None,
     ) -> None:
-        """Create a new remote slurm executor.
-
-        Args:
-            folder: The output folder, for example, "logs/%j". NOTE: if `remote_folder` is unset, \
-                this must be a relative path.
-            cluster_hostname: Hostname of the cluster to connect to.
-            remote_folder: Where `folder` will be mirrored on the remote cluster. Set to \
-                "$SCRATCH/`folder`" by default.
-            repo_dir_on_cluster: The directory on the cluster where the repo is cloned. If not \
-                passed, the repo is cloned in `$HOME/repos/<repo_name>`.
-            internet_access_on_compute_nodes: Whether compute nodes on that cluster have access to \
-                the internet.
-            max_num_timeout: Maximum number of job timeouts before giving up (from the base \
-                class constructor).
-            python: Python command. Defaults to `uv run --python=X.Y python`. Cannot be \
-                customized for now.
-        """
+        """Create a new remote slurm executor."""
         self._original_folder = folder  # save this argument that we'll modify.
         folder = Path(folder)
 
@@ -294,12 +310,14 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
         # Note: It seems like we really need to specify the full path to uv since `srun --pty uv` doesn't
         # work.
-        _uv_path: str = self.setup_uv()
+        uv_path: str = self.setup_uv()
         _python_version = ".".join(map(str, sys.version_info[:2]))
         # todo: Is this --offline flag actually useful?
         # offline = "--offline " if not self.internet_access_on_compute_nodes else ""
-        self.python = f"uv run --python={_python_version} python"
-        sync_dependencies_command = f"uv sync --python={_python_version} --all-extras --frozen"
+        self.python = f"{uv_path} run --python={_python_version} python"
+        sync_dependencies_command = (
+            f"{uv_path} sync --python={_python_version} --all-extras --frozen"
+        )
 
         repo_url = _current_repo_url()
         repo_name = _current_repo_name()
@@ -335,20 +353,34 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         #     # within each srun context when working with multiple nodes?
         #     # + [f"--chdir={self.worktree_path}"]
         # )
-        self.parameters.setdefault("stderr_to_stdout", True)
         _worktree_path = f"$SLURM_TMPDIR/{repo_name}-{commit_short}"
+
+        # worktrees = [
+        #     (_path := PurePosixPath((_parts := line.split())[0]), _ref := _parts[1])
+        #     for line in login_node.cd(repo_dir_on_cluster)
+        #     .get_output("git worktree list")
+        #     .splitlines()
+        # ]
+        # worktree_doesnt_exist = commit_short not in [p[1] for p in worktrees]
+
         self.parameters["setup"] = self.parameters.get("setup", []) + [
+            f"### Added by the {type(self).__name__}",
             f"# {cluster_hostname=}",
             "export UV_PYTHON_PREFERENCE='managed'",
+            "set -e  # Exit immediately if a command exits with a non-zero status.",
             f"cd {self.repo_dir_on_cluster}",
             (
-                f"git worktree add {_worktree_path} {commit} --lock "
+                f"git worktree add {_worktree_path} {commit} --force --detached --lock "
                 '--reason="Locked for reproducibility: This code was used in job $SLURM_JOB_ID"'
+                # if worktree_doesnt_exist
+                # else ""
             ),
             f"cd {_worktree_path}",
             "uv sync --all-extras --locked",
+            "###",
             # Trying out the idea of creating the venv in $SLURM_TMPDIR instead of in the worktree in $HOME.
         ]
+        self.parameters.setdefault("stderr_to_stdout", True)
 
     def submit(
         self, fn: Callable[P, OutT], *args: P.args, **kwargs: P.kwargs
@@ -463,8 +495,9 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             return []
         return self._internal_process_submissions(submissions)
 
+    # TODO: Move this out?
+    @staticmethod
     def sync_source_code(
-        self,
         login_node: "LoginNode",
         repo_dir_on_cluster: PurePosixPath,
         repo_url: str,
