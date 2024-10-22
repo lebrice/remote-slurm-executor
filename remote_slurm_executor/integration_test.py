@@ -1,3 +1,4 @@
+import collections
 import logging
 from pathlib import PosixPath
 from typing import TypeVar
@@ -20,11 +21,23 @@ def add(a: T, b: T) -> T:
     return a + b
 
 
+cluster_has_internet = collections.defaultdict(
+    bool,
+    {
+        "mila": True,
+        "cedar": True,
+        "narval": False,
+        "beluga": False,
+    },
+)
+
+
 @pytest.fixture(
     params=[
         "mila",
-        pytest.param("cedar", marks=pytest.mark.slow),
         pytest.param("narval", marks=pytest.mark.slow),
+        pytest.param("cedar", marks=pytest.mark.slow),
+        # pytest.param("beluga", marks=pytest.mark.slow),  # WAAAY too slow.
     ]
 )
 def cluster(request: pytest.FixtureRequest) -> str:
@@ -37,7 +50,6 @@ def test_autoexecutor(cluster: str):
         folder=folder,  # todo: perhaps we can rename this folder?
         cluster="remoteslurm",
         remoteslurm_cluster_hostname=cluster,
-        remoteslurm_I_dont_care_about_reproducibility=True,
     )
     assert isinstance(executor._executor, remote_slurm_executor.RemoteSlurmExecutor)
     assert executor._executor.folder == PosixPath(folder).absolute()
@@ -45,12 +57,20 @@ def test_autoexecutor(cluster: str):
 
 
 @pytest.fixture()
-def executor(cluster: str):
+def internet_on_compute_nodes(cluster: str, request: pytest.FixtureRequest) -> bool:
+    return getattr(request, "param", cluster_has_internet[cluster])
+
+
+@pytest.fixture()
+def executor(cluster: str, internet_on_compute_nodes: bool):
     executor = remote_slurm_executor.RemoteSlurmExecutor(
         folder="logs/%j",  # todo: perhaps we can rename this folder?
         cluster_hostname=cluster,
-        # I_dont_care_about_reproducibility=True,
+        internet_access_on_compute_nodes=internet_on_compute_nodes,
     )
+    # jobs shouldn't last more than 2-3 seconds, but adding more time
+    # in case the filesystem is misbehaving.
+    executor.update_parameters(time="00:05:00")
 
     if cluster != "mila":
         executor.update_parameters(account=get_slurm_account(cluster))
@@ -68,9 +88,7 @@ def test_submit(executor: remote_slurm_executor.RemoteSlurmExecutor):
     job = executor.submit(add, 5, 7)  # will compute add(5, 7)
     print(job.job_id)  # ID of your job
 
-    output = (
-        job.result()
-    )  # waits for the submitted function to complete and returns its output
+    output = job.result()  # waits for the submitted function to complete and returns its output
     # if ever the job failed, job.result() will raise an error with the corresponding trace
     assert output == 12  # 5 + 7 = 12...  your addition was computed in the cluster
     print(output)
