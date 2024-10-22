@@ -482,8 +482,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # In any case, fetch the latest changes on the remote.
         with self.login_node.chdir(repo_dir_on_cluster):
             self.login_node.run("git fetch")
-            self.login_node.run(f"git checkout {_current_commit()}")
-
+            # self.login_node.run(f"git checkout {_current_commit()}")
         return current_commit
 
     def _make_worktree_in_home(self) -> PurePosixPath:
