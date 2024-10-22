@@ -72,7 +72,7 @@ def executor(cluster: str, internet_on_compute_nodes: bool):
     )
     # jobs shouldn't last more than 2-3 seconds, but adding more time
     # in case the filesystem is misbehaving.
-    executor.update_parameters(time="00:00:30")
+    executor.update_parameters(time="00:05:00")
 
     if cluster != "mila":
         executor.update_parameters(account=get_slurm_account(cluster))
@@ -90,9 +90,7 @@ def test_submit(executor: remote_slurm_executor.RemoteSlurmExecutor):
     job = executor.submit(add, 5, 7)  # will compute add(5, 7)
     print(job.job_id)  # ID of your job
 
-    output = (
-        job.result()
-    )  # waits for the submitted function to complete and returns its output
+    output = job.result()  # waits for the submitted function to complete and returns its output
     # if ever the job failed, job.result() will raise an error with the corresponding trace
     assert output == 12  # 5 + 7 = 12...  your addition was computed in the cluster
     print(output)
