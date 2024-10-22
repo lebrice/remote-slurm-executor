@@ -497,7 +497,13 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         )
         repo_name = _current_repo_name()
 
-        remote_worktree_path = self.remote_home / "worktrees" / f"{repo_name}-{ref}"
+        remote_worktree_path = (
+            self.remote_home
+            / "worktrees"
+            / repo_name
+            / current_branch_name
+            / current_commit
+        )
 
         if not self.login_node.dir_exists(remote_worktree_path):
             self.login_node.run(f"mkdir -p {remote_worktree_path.parent}")
