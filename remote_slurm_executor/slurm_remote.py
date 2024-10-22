@@ -11,6 +11,7 @@ import logging
 import shlex
 import subprocess
 import sys
+import textwrap
 import time
 import typing as tp
 import uuid
@@ -254,6 +255,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         remote_folder: PurePosixPath | str | None = None,
         repo_dir_on_cluster: PurePosixPath | str | None = None,
         internet_access_on_compute_nodes: bool = True,
+        reproducibility_mode: bool = False,
         max_num_timeout: int = 3,
         python: str | None = f"uv run --python={CURRENT_PYTHON} python",
     ) -> None:
@@ -264,6 +266,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         self.cluster_hostname = cluster_hostname
         self.login_node = LoginNode(self.cluster_hostname)
         self.internet_access_on_compute_nodes = internet_access_on_compute_nodes
+        self.reproducibility_mode = reproducibility_mode  # TODO: Add tags for jobs (locally only).
 
         # Where we clone the repo on the cluster.
         if repo_dir_on_cluster is None:
@@ -353,10 +356,10 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             f"### Added by the {type(self).__name__}",
             f"# {cluster_hostname=}",
             "set -e  # Exit immediately if a command exits with a non-zero status.",
-            "export UV_PYTHON_PREFERENCE='managed'",
+            "export UV_PYTHON_PREFERENCE='managed'  # Prefer using the python managed by uv over the system's python.",
             "source $HOME/.cargo/env  # Needed so we can run `uv` in a non-interactive job, apparently.",
             (
-                f"git clone --branch {commit} -- {repo_dir_on_cluster}  {_worktree_path}"
+                f"git clone {repo_dir_on_cluster} {_worktree_path}"
                 # f"git worktree add {_worktree_path} {commit} --force --force --detach --lock "
                 # '--reason="Locked for reproducibility: This code was used in job $SLURM_JOB_ID"'
                 # if worktree_doesnt_exist
@@ -367,6 +370,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
                 # else f"git worktree repair {_worktree_path}"
             ),
             f"cd {_worktree_path}",
+            f"git reset --hard {commit}",
             "###",
             # Trying out the idea of creating the venv in $SLURM_TMPDIR instead of in the worktree in $HOME.
         ]
@@ -500,7 +504,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
                     "You have uncommitted changes! Please consider adding and committing them before re-running the command.\n"
                     "(This the best way to guarantee that the same code will be used on the remote cluster "
                     "and helps make your experiments easier to reproduce in the future.)\n"
-                    "Uncommitted changes:\n" + uncommitted_changes
+                    "Uncommitted changes:\n\n" + textwrap.indent(uncommitted_changes, "\t")
                 ),
                 style="orange3",  # Why the hell isn't 'orange' a colour?!
             )
@@ -630,12 +634,13 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
         # Job Array
 
-        folder = utils.JobPaths.get_first_id_independent_folder(self.folder)
-        folder.mkdir(parents=True, exist_ok=True)
+        # base_folder = utils.JobPaths.get_first_id_independent_folder(self.folder)
+        local_base_folder = self.local_base_folder
+        local_base_folder.mkdir(parents=True, exist_ok=True)
         timeout_min = self.parameters.get("time", 5)
         local_pickle_paths: list[Path] = []
         for d in delayed_submissions:
-            _pickle_path = folder / f"{uuid.uuid4().hex}.pkl"
+            _pickle_path = local_base_folder / f"{uuid.uuid4().hex}.pkl"
             d.set_timeout(timeout_min, self.max_num_timeout)
             d.dump(_pickle_path)
             local_pickle_paths.append(_pickle_path)
@@ -644,21 +649,27 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
         # self.remote_dir_sync.sync_to_remote()
 
-        # NOTE: I don't yet understand this part here. Seems like poor design to me.
+        # NOTE: I don't yet understand this part here. Why do they create a cloned executor?
+        # Seems like poor design to me.
 
         # Make a copy of the executor, since we don't want other jobs to be
         # scheduled as arrays.
-        array_ex = type(self)(
-            folder=self._original_folder,
+        array_ex = RemoteSlurmExecutor(
+            folder=self.folder,
             cluster_hostname=self.cluster_hostname,
+            remote_folder=self.remote_folder,
+            repo_dir_on_cluster=self.repo_dir_on_cluster,
             internet_access_on_compute_nodes=self.internet_access_on_compute_nodes,
             max_num_timeout=self.max_num_timeout,
-            python=None,
+            python=self.python,
+            reproducibility_mode=self.reproducibility_mode,
         )
         array_ex.update_parameters(**self.parameters)
         array_ex.parameters["map_count"] = n
+
         self._throttle()
         # Maybe that's an example of a case where we want to keep the submission file as a symlink?
+        # WHY aren't they using `array_ex.submit_map`?!
         first_job: core.Job[tp.Any] = array_ex._submit_command(
             self._submitit_command_str, _keep_sbatch_file_as_symlink=True
         )
@@ -677,9 +688,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # TODO: Handle these more explicitly.
         for job, local_pickle_path in zip(jobs, local_pickle_paths):
             # job.paths.move_temporary_file(pickle_path, "submitted_pickle")
-            # self._copy_to_remote(job.paths.submitted_pickle)
             _get_remote_path = self.remote_dir_sync._get_remote_path
-
             remote_pickle_path = self.remote_dir_sync.copy_to_remote(local_pickle_path)
 
             self.login_node.run(f"mkdir -p {_get_remote_path(job.paths.folder)}", display=False)
@@ -687,8 +696,9 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
                 f"mv {remote_pickle_path} {_get_remote_path(job.paths.submitted_pickle)}",
                 display=False,
             )
-            # job.paths.folder.mkdir(parents=True, exist_ok=True)
-            # Path(pickle_path).rename(job.paths.submitted_pickle)
+            # Reflect this locally as well?
+            job.paths.submitted_pickle.parent.mkdir(exist_ok=True, parents=True)
+            local_pickle_path.rename(job.paths.submitted_pickle)
 
         return jobs
 

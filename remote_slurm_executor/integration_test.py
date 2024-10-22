@@ -35,8 +35,8 @@ cluster_has_internet = collections.defaultdict(
 @pytest.fixture(
     params=[
         "mila",
-        pytest.param("cedar", marks=pytest.mark.slow),
         pytest.param("narval", marks=pytest.mark.slow),
+        pytest.param("cedar", marks=pytest.mark.slow),
         # pytest.param("beluga", marks=pytest.mark.slow),  # WAAAY too slow.
     ]
 )
