@@ -44,12 +44,25 @@ def test_autoexecutor(cluster: str):
     assert executor._executor.cluster_hostname == cluster
 
 
+@pytest.fixture(
+    params=[
+        ("mila", True),
+        (pytest.param("narval", marks=pytest.mark.slow), False),
+        (pytest.param("cedar", marks=pytest.mark.slow), True),
+    ]
+)
+def cluster_internet_on_compute_nodes(request: pytest.FixtureRequest) -> str:
+    return getattr(request, "param", ("mila", True))
+
+
 @pytest.fixture()
-def executor(cluster: str):
+def executor(cluster_internet_on_compute_nodes: tuple[str, bool]):
+    cluster, internet_on_compute_nodes = cluster_internet_on_compute_nodes
     executor = remote_slurm_executor.RemoteSlurmExecutor(
         folder="logs/%j",  # todo: perhaps we can rename this folder?
         cluster_hostname=cluster,
         # I_dont_care_about_reproducibility=True,
+        internet_access_on_compute_nodes=internet_on_compute_nodes,
     )
 
     if cluster != "mila":
