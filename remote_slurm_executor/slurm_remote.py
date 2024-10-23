@@ -3,7 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 #
-import contextlib
+import copy
 import dataclasses
 import functools
 import itertools
@@ -12,7 +12,6 @@ import shlex
 import subprocess
 import sys
 import textwrap
-import time
 import typing as tp
 import uuid
 import warnings
@@ -29,13 +28,12 @@ from typing import (
 )
 
 from milatools.cli import console
-from milatools.cli.utils import SSH_CONFIG_FILE
 from milatools.utils.local_v2 import LocalV2
-from milatools.utils.remote_v2 import Hide, RemoteV2
 from submitit.core import core, utils
 from submitit.slurm import slurm
 from submitit.slurm.slurm import SlurmInfoWatcher, SlurmJobEnvironment
-from typing_extensions import override
+
+from remote_slurm_executor.utils import LoginNode, RemoteDirSync
 
 OutT = TypeVar("OutT", covariant=True)
 P = ParamSpec("P")
@@ -49,74 +47,11 @@ logger = logging.getLogger(__name__)
 CURRENT_PYTHON = ".".join(map(str, sys.version_info[:3]))
 
 
-@dataclass(frozen=True)
-class RemoteDirSync:
-    login_node: "LoginNode"
-    remote_dir: PurePosixPath
-    local_dir: Path
-
-    def copy_to_remote(self, local_path: Path) -> PurePosixPath:
-        remote_path = self._get_remote_path(local_path)
-        self._copy_to_remote(local_path, remote_path)
-        return remote_path
-
-    def get_from_remote(
-        self, remote_path: PurePosixPath | None = None, local_path: Path | None = None
-    ) -> Path:
-        assert bool(remote_path) ^ bool(
-            local_path
-        ), "Exactly one of remote_path or local_path should be passed."
-        if remote_path:
-            local_path = self._get_local_path(remote_path)
-        else:
-            assert local_path
-            remote_path = self._get_remote_path(local_path)
-        self._get_from_remote(remote_path=remote_path, local_path=local_path)
-        return local_path
-
-    def _get_remote_path(self, local_path: Path) -> PurePosixPath:
-        return self.remote_dir / (local_path.absolute().relative_to(self.local_dir.absolute()))
-
-    def _get_local_path(self, remote_path: PurePosixPath) -> Path:
-        return self.local_dir / (remote_path.relative_to(self.remote_dir))
-
-    def _copy_to_remote(self, local_path: Path, remote_path: PurePosixPath):
-        assert local_path.is_file()
-        self.login_node.run(f"mkdir -p {remote_path.parent}")
-        # if self.login_node.file_exists(remote_path):
-        self.login_node.local_runner.run(
-            f"scp {local_path} {self.login_node.hostname}:{remote_path}", display=False
-        )
-        # else:
-        #     assert self.login_node.dir_exists(remote_path)
-        #     self.login_node.local_runner.run(
-        #         f"scp -r {local_path} {self.login_node.hostname}:{remote_path}", display=False
-        #     )
-        # Could also perhaps use rsync?
-        # self.login_node.local_runner.run(
-        #     f"rsync --recursive --links --safe-links --update "
-        #     f"{self.local_dir} {self.login_node.hostname}:{self.remote_dir.parent}"
-        # )
-
-    def _get_from_remote(self, remote_path: PurePosixPath, local_path: Path):
-        # todo: switch between rsync and scp based on in the remote path is a file or a dir?
-        local_path.parent.mkdir(exist_ok=True, parents=True)
-        if self.login_node.file_exists(remote_path):
-            self.login_node.local_runner.run(
-                f"scp {self.login_node.hostname}:{remote_path} {local_path}",
-                display=False,
-            )
-        else:
-            assert self.login_node.dir_exists(remote_path)
-            self.login_node.local_runner.run(
-                f"scp -r {self.login_node.hostname}:{remote_path} {local_path}",
-                display=False,
-            )
-        # Could also perhaps use rsync?
-        # self.login_node.local_runner.run(
-        #     f"rsync --recursive --links --safe-links --update "
-        #     f"{self.login_node.hostname}:{self.remote_dir} {self.local_dir.parent}"
-        # )
+# Could also perhaps use rsync?
+# self.login_node.local_runner.run(
+#     f"rsync --recursive --links --safe-links --update "
+#     f"{self.login_node.hostname}:{self.remote_dir} {self.local_dir.parent}"
+# )
 
 
 class RemoteSlurmInfoWatcher(SlurmInfoWatcher):
@@ -203,13 +138,13 @@ class DelayedSubmission(utils.DelayedSubmission, Generic[P, OutT]):
 class RemoteSlurmExecutor(slurm.SlurmExecutor):
     """Executor for a remote SLURM cluster.
 
-    - Installs `uv` on the remote cluster.
-    - Syncs dependencies with `uv sync --all-extras` on the login node.
+     - Installs `uv` on the remote cluster.
+     - Syncs dependencies with `uv sync --all-extras` on the login node.
 
-    ## TODOs:
-    - [ ] Unable to launch jobs from the `master` branch of a repo, because we try to create a
-          worktree and the branch is already checked out in the cloned repo!
-    - [ ] TODO: Add a tag like {cluster_name}-{job_id} to the commit once we know the job id?
+     ## TODOs / ideas:
+    - [ ] Add a tag like {cluster_name}-{job_id} to the commit once we know the job id?
+    - [ ] Prevent the warning being logged twice (and syncing of source code as well) when launching
+          an array job. Avoid re-creating an executor when submitting array jobs if possible.
     """
 
     folder: Path
@@ -398,7 +333,17 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
     def process_submission(self, ds: DelayedSubmission[..., OutT]) -> RemoteSlurmJob[OutT]:
         # NOTE: Expanded (copied) from the base class, just to see what's going on.
-        timeout_min = self.parameters.get("time", 5)
+        time = self.parameters.get("time", 5)
+        if isinstance(time, int):
+            timeout_min = time
+        else:
+            from datetime import datetime, timedelta
+
+            t = datetime.strptime(time, "%D-%H:%M:%S")
+            # ...and use datetime's hour, min and sec properties to build a timedelta
+            delta = timedelta(hours=t.hour, minutes=t.minute, seconds=t.second)
+            timeout_min = int(delta.total_seconds() // 60)
+
         tmp_uuid = uuid.uuid4().hex
         local_pickle_path = get_first_id_independent_folder(self.folder) / f"{tmp_uuid}.pkl"
         local_pickle_path.parent.mkdir(parents=True, exist_ok=True)
@@ -656,24 +601,36 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # NOTE: I don't yet understand this part here. Why do they create a cloned executor?
         # Seems like poor design to me.
 
-        # Make a copy of the executor, since we don't want other jobs to be
-        # scheduled as arrays.
-        array_ex = RemoteSlurmExecutor(
-            folder=self.folder,
-            cluster_hostname=self.cluster_hostname,
-            remote_folder=self.remote_folder,
-            repo_dir_on_cluster=self.repo_dir_on_cluster,
-            internet_access_on_compute_nodes=self.internet_access_on_compute_nodes,
-            max_num_timeout=self.max_num_timeout,
-            python=self.python,
-            reproducibility_mode=self.reproducibility_mode,
-        )
-        array_ex.update_parameters(**self.parameters)
-        array_ex.parameters["map_count"] = n
+        # "Make a copy of the executor, since we don't want other jobs to be
+        # scheduled as arrays." (TODO: What does this mean?)
+        # array_ex = RemoteSlurmExecutor(
+        #     folder=self.folder,
+        #     cluster_hostname=self.cluster_hostname,
+        #     remote_folder=self.remote_folder,
+        #     repo_dir_on_cluster=self.repo_dir_on_cluster,
+        #     internet_access_on_compute_nodes=self.internet_access_on_compute_nodes,
+        #     max_num_timeout=self.max_num_timeout,
+        #     python=self.python,
+        #     reproducibility_mode=self.reproducibility_mode,
+        # )
+        # array_ex.update_parameters(**self.parameters)
+        # array_ex.parameters["map_count"] = n
+
+        array_ex = copy.deepcopy(self)
+        array_ex._delayed_batch = None  # I imagine that this is what they wanted to not propagate?
+        array_ex.update_parameters(map_count=n)
+
+        # slurm._make_sbatch_string  # Uncomment to look at the code with ctrl+click.
+        # THis is where "map_count" is used in _make_sbatch_string:
+        # if map_count is not None:
+        #     assert isinstance(map_count, int) and map_count
+        #     parameters["array"] = f"0-{map_count - 1}%{min(map_count, array_parallelism)}"
+        #     stdout = stdout.replace("%j", "%A_%a")
+        #     stderr = stderr.replace("%j", "%A_%a")
 
         self._throttle()
         # Maybe that's an example of a case where we want to keep the submission file as a symlink?
-        # WHY aren't they using `array_ex.submit_map`?!
+        # WHY not use `array_ex.submit` here?
         first_job: core.Job[tp.Any] = array_ex._submit_command(
             self._submitit_command_str, _keep_sbatch_file_as_symlink=True
         )
@@ -740,128 +697,8 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
     @classmethod
     def affinity(cls) -> int:
-        return 2
         # return -1 if shutil.which("srun") is None else 2
-
-
-@dataclasses.dataclass(init=False)
-class LoginNode(RemoteV2):
-    # Tiny improvements / changes to the RemoteV2 class from milatools.
-
-    command_prefix: str = ""
-
-    def __init__(
-        self,
-        hostname: str,
-        *,
-        control_path: Path | None = None,
-        ssh_config_path: Path = SSH_CONFIG_FILE,
-        _start_control_socket: bool = True,
-        command_prefix: str = "",
-    ):
-        super().__init__(
-            hostname,
-            control_path=control_path,
-            ssh_config_path=ssh_config_path,
-            _start_control_socket=_start_control_socket,
-        )
-        self._start_control_socket = _start_control_socket
-        self.command_prefix = command_prefix
-
-    def dir_exists(self, remote_dir: PurePosixPath | str) -> bool:
-        return (
-            self.run(
-                f"test -d {remote_dir}",
-                warn=True,
-                hide=True,
-                display=False,
-            ).returncode
-            == 0
-        )
-
-    def file_exists(self, remote_dir: PurePosixPath | str) -> bool:
-        return (
-            self.run(
-                f"test -f {remote_dir}",
-                warn=True,
-                hide=True,
-                display=False,
-            ).returncode
-            == 0
-        )
-
-    @contextlib.contextmanager
-    def chdir(self, remote_dir: PurePosixPath | str):
-        before = self.command_prefix
-        if self.command_prefix:
-            self.command_prefix = f"{self.command_prefix} && cd {remote_dir} && "
-        else:
-            self.command_prefix = f"cd {remote_dir} && "
-
-        yield
-
-        self.command_prefix = before
-
-    def cd(self, remote_dir: PurePosixPath | str):
-        cd_command = f"cd {remote_dir}"
-        if self.command_prefix:
-            new_prefix = f"{self.command_prefix} && {cd_command}"
-        else:
-            new_prefix = cd_command
-        return type(self)(
-            hostname=self.hostname,
-            control_path=self.control_path,
-            ssh_config_path=self.ssh_config_path,
-            _start_control_socket=self._start_control_socket,
-            command_prefix=new_prefix,
-        )
-
-    def display(self, command: str, input: str | None = None, _stack_offset: int = 3):
-        message = f"({self.hostname}) $ {command}"
-        if input:
-            message += f"\n{input}"
-
-        console.log(message, style="green", _stack_offset=_stack_offset)
-
-    @override
-    def run(
-        self,
-        command: str,
-        *,
-        input: str | None = None,
-        display: bool = False,  # changed to default of False
-        warn: bool = False,
-        hide: Hide = False,
-    ):
-        if display:
-            self.display(command, input=input, _stack_offset=3)
-        return super().run(
-            self.command_prefix + command,
-            input=input,
-            display=False,
-            warn=warn,
-            hide=hide,
-        )
-
-    @override
-    async def run_async(
-        self,
-        command: str,
-        *,
-        input: str | None = None,
-        display: bool = False,  # changed to default of False
-        warn: bool = False,
-        hide: Hide = False,
-    ) -> subprocess.CompletedProcess[str]:
-        if display:
-            self.display(command, input=input, _stack_offset=3)
-        return await super().run_async(
-            self.command_prefix + command,
-            input=input,
-            display=False,
-            warn=warn,
-            hide=hide,
-        )
+        return 2
 
 
 _Path = TypeVar("_Path", bound=PurePath)
