@@ -221,13 +221,13 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
     cluster_hostname: str
     """Hostname of the cluster to connect to."""
 
-    remote_folder: PurePosixPath
+    remote_folder: str = ""
     """Where `folder` will be mirrored on the remote cluster.
 
     Set to "$SCRATCH/`folder`" by default.
     """
 
-    repo_dir_on_cluster: PurePosixPath
+    repo_dir_on_cluster: str = ""
     """The directory on the cluster where the repo is cloned.
 
     If not passed, the repo is cloned in `$HOME/repos/<repo_name>`.
@@ -269,14 +269,14 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         self.reproducibility_mode = reproducibility_mode  # TODO: Add tags for jobs (locally only).
 
         # Where we clone the repo on the cluster.
-        if repo_dir_on_cluster is None:
+        if not repo_dir_on_cluster:
             repo_dir_on_cluster = (
                 PurePosixPath(self.login_node.get_output("echo $HOME"))
                 / "repos"
                 / _current_repo_name()
             )
-        repo_dir_on_cluster = PurePosixPath(repo_dir_on_cluster)
-        self.repo_dir_on_cluster = repo_dir_on_cluster
+        # repo_dir_on_cluster = PurePosixPath(repo_dir_on_cluster)
+        self.repo_dir_on_cluster = str(repo_dir_on_cluster)
 
         # "base folder" := last part of `folder` that isn't dependent on the job id or task id (no
         # %j %t, %A, etc).
@@ -285,12 +285,14 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         self.local_base_folder = Path(base_folder).absolute()
 
         # This is the folder where we store the pickle files on the remote.
-        if remote_folder is None:
+        if not remote_folder:
             assert not folder.is_absolute()
             _remote_scratch = PurePosixPath(self.login_node.get_output("echo $SCRATCH"))
             remote_folder = _remote_scratch / folder.relative_to(base_folder)
-        self.remote_folder = PurePosixPath(remote_folder)
-        self.remote_base_folder = get_first_id_independent_folder(self.remote_folder)
+        self.remote_folder = str(remote_folder)
+        self.remote_base_folder = get_first_id_independent_folder(
+            PurePosixPath(self.remote_folder)
+        )
 
         self.remote_dir_sync = RemoteDirSync(
             self.login_node,
@@ -316,7 +318,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
         self.sync_source_code(
             login_node=login_node,
-            repo_dir_on_cluster=self.repo_dir_on_cluster,
+            repo_dir_on_cluster=PurePosixPath(self.repo_dir_on_cluster),
             repo_url=repo_url,
             commit=commit,
         )
