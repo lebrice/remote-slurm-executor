@@ -16,7 +16,7 @@ import typing as tp
 import uuid
 import warnings
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import KW_ONLY, dataclass
 from pathlib import Path, PurePath, PurePosixPath
 from typing import (
     Any,
@@ -134,7 +134,7 @@ class DelayedSubmission(utils.DelayedSubmission, Generic[P, OutT]):
         return super().result()
 
 
-@dataclasses.dataclass(init=False)
+@dataclasses.dataclass()
 class RemoteSlurmExecutor(slurm.SlurmExecutor):
     """Executor for a remote SLURM cluster.
 
@@ -147,11 +147,13 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
           an array job. Avoid re-creating an executor when submitting array jobs if possible.
     """
 
-    folder: Path
+    folder: str | Path
     """The output folder, for example, "logs/%j".
 
     NOTE: if `remote_folder` is unset, this must be a relative path.
     """
+
+    _: KW_ONLY
 
     cluster_hostname: str
     """Hostname of the cluster to connect to."""
@@ -180,51 +182,52 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
     Defaults to `uv run --python=X.Y python`. Cannot be customized for now.
     """
 
+    _map_count: int | None = None
+
     job_class: ClassVar[type[RemoteSlurmJob]] = RemoteSlurmJob
 
-    def __init__(
+    def __post_init__(
         self,
-        folder: PurePath | str,
-        *,
-        cluster_hostname: str,
-        remote_folder: PurePosixPath | str | None = None,
-        repo_dir_on_cluster: PurePosixPath | str | None = None,
-        internet_access_on_compute_nodes: bool = True,
-        reproducibility_mode: bool = False,
-        max_num_timeout: int = 3,
-        python: str | None = f"uv run --python={CURRENT_PYTHON} python",
+        # folder: PurePath | str,
+        # *,
+        # cluster_hostname: str,
+        # remote_folder: PurePosixPath | str | None = None,
+        # repo_dir_on_cluster: PurePosixPath | str | None = None,
+        # internet_access_on_compute_nodes: bool = True,
+        # reproducibility_mode: bool = False,
+        # max_num_timeout: int = 3,
+        # python: str | None = f"uv run --python={CURRENT_PYTHON} python",
+        # _map_count: int | None = None,
     ) -> None:
         """Create a new remote slurm executor."""
-        self._original_folder = folder  # save this argument that we'll modify.
-        folder = Path(folder)
+        self._original_folder = self.folder  # save this argument that we'll modify.
+        self.folder = Path(self.folder)
 
-        self.cluster_hostname = cluster_hostname
+        # self.cluster_hostname = cluster_hostname
         self.login_node = LoginNode(self.cluster_hostname)
-        self.internet_access_on_compute_nodes = internet_access_on_compute_nodes
-        self.reproducibility_mode = reproducibility_mode  # TODO: Add tags for jobs (locally only).
+        # self.internet_access_on_compute_nodes = internet_access_on_compute_nodes
+        # self.reproducibility_mode = reproducibility_mode  # TODO: Add tags for jobs (locally only).
 
         # Where we clone the repo on the cluster.
-        if not repo_dir_on_cluster:
-            repo_dir_on_cluster = (
+        if not self.repo_dir_on_cluster:
+            self.repo_dir_on_cluster = str(
                 PurePosixPath(self.login_node.get_output("echo $HOME"))
                 / "repos"
                 / _current_repo_name()
             )
-        # repo_dir_on_cluster = PurePosixPath(repo_dir_on_cluster)
-        self.repo_dir_on_cluster = str(repo_dir_on_cluster)
 
         # "base folder" := last part of `folder` that isn't dependent on the job id or task id (no
         # %j %t, %A, etc).
         # For example: "logs/%j" -> "logs"
-        base_folder = get_first_id_independent_folder(folder)
+        base_folder = get_first_id_independent_folder(self.folder)
         self.local_base_folder = Path(base_folder).absolute()
 
         # This is the folder where we store the pickle files on the remote.
-        if not remote_folder:
-            assert not folder.is_absolute()
+        if not self.remote_folder:
+            assert not self.folder.is_absolute()
             _remote_scratch = PurePosixPath(self.login_node.get_output("echo $SCRATCH"))
-            remote_folder = _remote_scratch / folder.relative_to(base_folder)
-        self.remote_folder = str(remote_folder)
+            self.remote_folder = str(_remote_scratch / self.folder.relative_to(base_folder))
+
         self.remote_base_folder = get_first_id_independent_folder(
             PurePosixPath(self.remote_folder)
         )
@@ -235,7 +238,9 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             remote_dir=self.remote_base_folder,
         )
 
-        super().__init__(folder=folder, max_num_timeout=max_num_timeout, python=python)
+        super().__init__(
+            folder=self.folder, max_num_timeout=self.max_num_timeout, python=self.python
+        )
 
         # Note: It seems like we really need to specify the full path to uv since `srun --pty uv`
         # doesn't work?
@@ -258,12 +263,12 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             commit=commit,
         )
 
-        if not internet_access_on_compute_nodes:
+        if not self.internet_access_on_compute_nodes:
             logger.info(
                 "Syncing the dependencies on the login node once, so that they are in the cache "
                 "and available for the job later."
             )
-            with login_node.chdir(repo_dir_on_cluster):
+            with login_node.chdir(self.repo_dir_on_cluster):
                 # Assume that we've already synced the code and the dependencies.
                 # IDEA: IF there is internet access on the compute nodes, then perhaps we could sync
                 # the dependencies on a compute node instead of on the login nodes?
@@ -292,14 +297,14 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
         added_setup_block = [
             f"### Added by the {type(self).__name__}",
-            f"# {cluster_hostname=}",
+            f"# cluster_hostname={self.cluster_hostname}",
             # TODO: Would love to set this, but the --link-mode raises an error below.
             "set -e  # Exit immediately if a command exits with a non-zero status.",
             "export UV_PYTHON_PREFERENCE='managed'  # Prefer using the python managed by uv over the system's python.",
             "export UV_LINK_MODE='copy'  # Don't quit the job if we can't use hardlinks from the cache.",
             "source $HOME/.cargo/env  # Needed so we can run `uv` in a non-interactive job, apparently.",
             (
-                f"git clone {repo_dir_on_cluster} {_worktree_path}"
+                f"git clone {self.repo_dir_on_cluster} {_worktree_path}"
                 # f"git worktree add {_worktree_path} {commit} --force --force --detach --lock "
                 # '--reason="Locked for reproducibility: This code was used in job $SLURM_JOB_ID"'
                 # if worktree_doesnt_exist
@@ -588,7 +593,9 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
         array_ex = copy.deepcopy(self)
         array_ex._delayed_batch = None  # I imagine that this is what they wanted to not propagate?
-        array_ex.update_parameters(map_count=n)
+        # Can't even use .update_parameters() because `map_count` isn't allowed?
+        array_ex.map_count = n
+        # array_ex.update_parameters(map_count=n)
 
         # slurm._make_sbatch_string  # Uncomment to look at the code with ctrl+click.
         # THis is where "map_count" is used in _make_sbatch_string:
