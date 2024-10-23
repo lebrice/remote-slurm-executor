@@ -461,18 +461,25 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             return []
         return self._internal_process_submissions(submissions)
 
-    # TODO: Move this out?
-
     def setup_uv(self) -> str:
-        if not (uv_path := self._get_uv_path()):
-            logger.info(f"Setting up [uv](https://docs.astral.sh/uv/) on {self.cluster_hostname}")
-            self.login_node.run(
-                "curl -LsSf https://astral.sh/uv/install.sh | sh && source ~/.cargo/env"
+        home = self.login_node.get_output("echo $HOME")
+        # TODO: Fix this: shouldn't be hard-coded!
+        hard_coded_uv_path = f"{home}/.cargo/bin/uv"
+
+        def _uv_is_installed_at_hard_coded_path() -> bool:
+            return (
+                self.login_node.run(
+                    f"test -x {hard_coded_uv_path}", display=False, hide=True, warn=True
+                ).returncode
+                == 0
             )
-            uv_path = self._get_uv_path()
-            if uv_path is None:
+
+        if not _uv_is_installed_at_hard_coded_path():
+            logger.info(f"Setting up [uv](https://docs.astral.sh/uv/) on {self.cluster_hostname}")
+            self.login_node.run("curl -LsSf https://astral.sh/uv/install.sh | sh")
+            if not _uv_is_installed_at_hard_coded_path():
                 raise RuntimeError(f"Unable to setup `uv` on the {self.cluster_hostname} cluster!")
-        return uv_path
+        return hard_coded_uv_path
 
     def _get_uv_path(self) -> str | None:
         return (
