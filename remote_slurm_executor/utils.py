@@ -63,14 +63,21 @@ class LoginNode(RemoteV2):
     @contextlib.contextmanager
     def chdir(self, remote_dir: PurePosixPath | str):
         before = self.command_prefix
+        before_text = self.displayed_prefix
         if self.command_prefix:
             self.command_prefix = f"{self.command_prefix} && cd {remote_dir} && "
         else:
             self.command_prefix = f"cd {remote_dir} && "
+        # Change the display of commands.
+        if self.displayed_prefix:
+            self.displayed_prefix = f"{self.displayed_prefix} ({remote_dir}) "
+        else:
+            self.displayed_prefix = f"({remote_dir}) "
 
         yield
 
         self.command_prefix = before
+        self.displayed_prefix = before_text
 
     def cd(self, remote_dir: PurePosixPath | str):
         cd_command = f"cd {remote_dir}"
