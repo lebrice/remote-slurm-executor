@@ -176,7 +176,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
     max_num_timeout: int = 3
     """Maximum number of job timeouts before giving up (from the base class)."""
 
-    python: str | None = None
+    python: str | None = f"uv run --python={CURRENT_PYTHON} python"
     """Python command.
 
     Defaults to `uv run --python=X.Y python`. Cannot be customized for now.
@@ -656,8 +656,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
         # Note: annoying, but seems like `srun_args` is fed through shlex.quote or
         # something, which causes issues with the evaluation of variables.
-        chdir_to_worktree = "--chdir=$WORKTREE_LOCATION"
-        return content_with_remote_paths.replace(f"'{chdir_to_worktree}'", chdir_to_worktree)
+        return content_with_remote_paths
 
     def _num_tasks(self) -> int:
         nodes: int = self.parameters.get("nodes", 1)
