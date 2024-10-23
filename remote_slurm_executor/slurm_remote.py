@@ -476,14 +476,15 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
     def _get_uv_path(self) -> str | None:
         return (
-            LocalV2.get_output(
-                ("ssh", self.cluster_hostname, "which", "uv"),
+            self.login_node.get_output(
+                "which uv",
                 warn=True,
+                hide=True,
             )
-            or LocalV2.get_output(
-                ("ssh", self.cluster_hostname, "bash", "-l", "which", "uv"),
-                warn=True,
-            )
+            # or LocalV2.get_output(
+            #     ("ssh", self.cluster_hostname, "bash", "-l", "which", "uv"),
+            #     warn=True,
+            # )
             or None
         )
 
