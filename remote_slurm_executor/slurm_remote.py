@@ -12,6 +12,7 @@ import shlex
 import subprocess
 import sys
 import textwrap
+import time as _time
 import typing as tp
 import uuid
 import warnings
@@ -186,19 +187,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
     job_class: ClassVar[type[RemoteSlurmJob]] = RemoteSlurmJob
 
-    def __post_init__(
-        self,
-        # folder: PurePath | str,
-        # *,
-        # cluster_hostname: str,
-        # remote_folder: PurePosixPath | str | None = None,
-        # repo_dir_on_cluster: PurePosixPath | str | None = None,
-        # internet_access_on_compute_nodes: bool = True,
-        # reproducibility_mode: bool = False,
-        # max_num_timeout: int = 3,
-        # python: str | None = f"uv run --python={CURRENT_PYTHON} python",
-        # _map_count: int | None = None,
-    ) -> None:
+    def __post_init__(self) -> None:
         """Create a new remote slurm executor."""
         self._original_folder = self.folder  # save this argument that we'll modify.
         self.folder = Path(self.folder)
@@ -347,13 +336,13 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         else:
             from datetime import datetime, timedelta
 
-            t = datetime.strptime(time, "%D-%H:%M:%S")
+            t = datetime.strptime(time, "%d-%H:%M:%S")
             # ...and use datetime's hour, min and sec properties to build a timedelta
             delta = timedelta(hours=t.hour, minutes=t.minute, seconds=t.second)
             timeout_min = int(delta.total_seconds() // 60)
 
         tmp_uuid = uuid.uuid4().hex
-        local_pickle_path = get_first_id_independent_folder(self.folder) / f"{tmp_uuid}.pkl"
+        local_pickle_path = get_first_id_independent_folder(Path(self.folder)) / f"{tmp_uuid}.pkl"
         local_pickle_path.parent.mkdir(parents=True, exist_ok=True)
         ds.set_timeout(timeout_min, self.max_num_timeout)
         ds.dump(local_pickle_path)
@@ -362,7 +351,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # self.remote_dir_sync.sync_to_remote()
 
         self._throttle()
-        self._last_job_submitted = time.time()
+        self._last_job_submitted = _time.time()
         # NOTE: Choosing to remove the submission file, instead of making it a symlink like in the
         # base class.
         job = self._submit_command(self._submitit_command_str, _keep_sbatch_file_as_symlink=False)
