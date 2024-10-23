@@ -594,7 +594,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         array_ex = copy.deepcopy(self)
         array_ex._delayed_batch = None  # I imagine that this is what they wanted to not propagate?
         # Can't even use .update_parameters() because `map_count` isn't allowed?
-        array_ex.map_count = n
+        array_ex._map_count = n
         # array_ex.update_parameters(map_count=n)
 
         # slurm._make_sbatch_string  # Uncomment to look at the code with ctrl+click.
@@ -645,7 +645,10 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         #     command=command, folder=self.remote_folder, **self.parameters
         # )
         content_with_local_paths = slurm._make_sbatch_string(
-            command=command, folder=self.folder, **self.parameters
+            command=command,
+            folder=self.folder,
+            **self.parameters,
+            map_count=self._map_count,
         )
         content_with_remote_paths = content_with_local_paths.replace(
             str(self.local_base_folder.absolute()), str(self.remote_base_folder)
