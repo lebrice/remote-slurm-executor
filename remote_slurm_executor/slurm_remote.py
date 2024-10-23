@@ -8,6 +8,7 @@ import dataclasses
 import functools
 import itertools
 import logging
+import re
 import shlex
 import subprocess
 import sys
@@ -177,7 +178,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
     max_num_timeout: int = 3
     """Maximum number of job timeouts before giving up (from the base class)."""
 
-    python: str | None = f"uv run --python={CURRENT_PYTHON} python"
+    python: str = f"uv run --python={CURRENT_PYTHON} python"
     """Python command.
 
     Defaults to `uv run --python=X.Y python`. Cannot be customized for now.
@@ -226,6 +227,13 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             local_dir=self.local_base_folder,
             remote_dir=self.remote_base_folder,
         )
+
+        if (
+            not self.internet_access_on_compute_nodes
+            and "uv" in self.python
+            and "--offline" not in self.python
+        ):
+            self.python = self.python.replace("uv", "uv --offline")
 
         super().__init__(
             folder=self.folder, max_num_timeout=self.max_num_timeout, python=self.python
@@ -336,10 +344,25 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         else:
             from datetime import datetime, timedelta
 
-            t = datetime.strptime(time, "%d-%H:%M:%S")
-            # ...and use datetime's hour, min and sec properties to build a timedelta
-            delta = timedelta(hours=t.hour, minutes=t.minute, seconds=t.second)
-            timeout_min = int(delta.total_seconds() // 60)
+            # full timestamp with milliseconds
+            if re.match(r"\d+-\d{2}:\d{2}:\d{2}", time):
+                t = datetime.strptime(time, "%d-%H:%M:%S")
+                delta = timedelta(days=t.day, hours=t.hour, minutes=t.minute, seconds=t.second)
+                timeout_min = int(delta.total_seconds() // 60)
+            elif re.match(r"\d{2}:\d{2}:\d{2}", time):
+                t = datetime.strptime(time, "%H:%M:%S")
+                delta = timedelta(hours=t.hour, minutes=t.minute, seconds=t.second)
+                timeout_min = int(delta.total_seconds() // 60)
+            elif re.match(r"\d{2}:\d{2}", time):
+                t = datetime.strptime(time, "%M:%S")
+                delta = timedelta(minutes=t.minute, seconds=t.second)
+                timeout_min = int(delta.total_seconds() // 60)
+            else:
+                raise NotImplementedError(
+                    f"Can't infer job duration in minutes (for submitit) from --time flag: '{time}'"
+                )
+            # # unknown timestamp format
+            # return false
 
         tmp_uuid = uuid.uuid4().hex
         local_pickle_path = get_first_id_independent_folder(Path(self.folder)) / f"{tmp_uuid}.pkl"
@@ -767,4 +790,4 @@ def sync_source_code(
     # In any case, fetch the latest changes on the remote and checkout that commit.
     with login_node.chdir(repo_dir_on_cluster):
         login_node.run("git fetch", display=True)
-        login_node.run(f"git checkout {commit}", display=True)
+        login_node.run(f"git checkout {commit}", display=True, hide=True)

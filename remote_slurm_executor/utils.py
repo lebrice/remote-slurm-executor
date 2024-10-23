@@ -16,6 +16,7 @@ class LoginNode(RemoteV2):
     # Tiny improvements / changes to the RemoteV2 class from milatools.
 
     command_prefix: str = ""
+    displayed_prefix: str = ""
 
     def __init__(
         self,
@@ -25,6 +26,7 @@ class LoginNode(RemoteV2):
         ssh_config_path: Path = SSH_CONFIG_FILE,
         _start_control_socket: bool = True,
         command_prefix: str = "",
+        displayed_prefix: str | None = None,
     ):
         super().__init__(
             hostname,
@@ -34,6 +36,7 @@ class LoginNode(RemoteV2):
         )
         self._start_control_socket = _start_control_socket
         self.command_prefix = command_prefix
+        self.displayed_prefix = displayed_prefix or command_prefix
 
     def dir_exists(self, remote_dir: PurePosixPath | str) -> bool:
         return (
@@ -101,7 +104,7 @@ class LoginNode(RemoteV2):
         hide: Hide = False,
     ):
         if display:
-            self.display(command, input=input, _stack_offset=3)
+            self.display(self.displayed_prefix + command, input=input, _stack_offset=3)
         return super().run(
             self.command_prefix + command,
             input=input,
@@ -121,7 +124,7 @@ class LoginNode(RemoteV2):
         hide: Hide = False,
     ) -> subprocess.CompletedProcess[str]:
         if display:
-            self.display(command, input=input, _stack_offset=3)
+            self.display(self.displayed_prefix + command, input=input, _stack_offset=3)
         return await super().run_async(
             self.command_prefix + command,
             input=input,
