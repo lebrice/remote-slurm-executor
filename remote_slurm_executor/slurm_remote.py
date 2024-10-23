@@ -245,7 +245,10 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # todo: Is this --offline flag actually useful?
         # offline = "--offline " if not self.internet_access_on_compute_nodes else ""
         # self.python = f"{uv_path} run --python={CURRENT_PYTHON} python"
-        sync_dependencies_command = f"uv sync --python={CURRENT_PYTHON} --all-extras --frozen"
+        setup_python_command = f"{_uv_path} python install {CURRENT_PYTHON}"
+        sync_dependencies_command = (
+            f"{_uv_path} sync --python={CURRENT_PYTHON} --all-extras --frozen"
+        )
 
         repo_url = _current_repo_url()
         repo_name = _current_repo_name()
@@ -266,9 +269,10 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
                 "and available for the job later."
             )
             with login_node.chdir(self.repo_dir_on_cluster):
-                # Assume that we've already synced the code and the dependencies.
+                # Assume that we've already synced the code.
                 # IDEA: IF there is internet access on the compute nodes, then perhaps we could sync
                 # the dependencies on a compute node instead of on the login nodes?
+                login_node.run(setup_python_command, display=True)
                 login_node.run(sync_dependencies_command, display=True)
                 # NOTE: We could also remove the venv since we mainly want the dependencies to be downloaded
                 # to the cache.
@@ -345,15 +349,15 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             from datetime import datetime, timedelta
 
             # full timestamp with milliseconds
-            if re.match(r"\d+-\d{2}:\d{2}:\d{2}", time):
+            if re.match(r"\d+-\d{1,2}:\d{1,2}:\d{1,2}", time):
                 t = datetime.strptime(time, "%d-%H:%M:%S")
                 delta = timedelta(days=t.day, hours=t.hour, minutes=t.minute, seconds=t.second)
                 timeout_min = int(delta.total_seconds() // 60)
-            elif re.match(r"\d{2}:\d{2}:\d{2}", time):
+            elif re.match(r"\d{1,2}:\d{1,2}:\d{1,2}", time):
                 t = datetime.strptime(time, "%H:%M:%S")
                 delta = timedelta(hours=t.hour, minutes=t.minute, seconds=t.second)
                 timeout_min = int(delta.total_seconds() // 60)
-            elif re.match(r"\d{2}:\d{2}", time):
+            elif re.match(r"\d{1,2}:\d{1,2}", time):
                 t = datetime.strptime(time, "%M:%S")
                 delta = timedelta(minutes=t.minute, seconds=t.second)
                 timeout_min = int(delta.total_seconds() // 60)

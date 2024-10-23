@@ -75,13 +75,7 @@ def executor(cluster: str, internet_on_compute_nodes: bool):
     if cluster != "mila":
         executor.update_parameters(account=get_slurm_account(cluster))
 
-    try:
-        yield executor
-    finally:
-        pass
-        assert executor.remote_dir_sync
-        # Comment / uncomment to keep the mount after the test to inspect results.
-        # executor.remote_dir_mount.unmount()
+    yield executor
 
 
 def test_submit(executor: remote_slurm_executor.RemoteSlurmExecutor):
