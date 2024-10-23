@@ -1,9 +1,12 @@
 import contextlib
 import dataclasses
+import shlex
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+import milatools.utils.local_v2
 from milatools.cli import console
 from milatools.cli.utils import SSH_CONFIG_FILE
 from milatools.utils.local_v2 import Hide
@@ -204,3 +207,75 @@ class RemoteDirSync:
                 f"scp -r {self.login_node.hostname}:{remote_path} {local_path}",
                 display=False,
             )
+
+
+def run(
+    program_and_args: tuple[str, ...],
+    input: str | None = None,
+    warn: bool = False,
+    hide: Hide = False,
+) -> subprocess.CompletedProcess[str]:
+    """Runs the command *synchronously* in a subprocess and returns the result.
+
+    Parameters
+    ----------
+    program_and_args: The program and arguments to pass to it. This is a tuple of \
+        strings, same as in `subprocess.Popen`.
+    input: The optional 'input' argument to `subprocess.Popen.communicate()`.
+    warn: When `True` and an exception occurs, warn instead of raising the exception.
+    hide: Controls the printing of the subprocess' stdout and stderr.
+
+    Returns
+    -------
+    The `subprocess.CompletedProcess` object with the result of the subprocess.
+
+    Raises
+    ------
+    subprocess.CalledProcessError
+        If an error occurs when running the command and `warn` is `False`.
+    """
+    logger = milatools.utils.local_v2.logger
+    displayed_command = shlex.join(program_and_args)
+    if not input:
+        logger.debug(f"Calling `subprocess.run` with {program_and_args=}")
+    else:
+        logger.debug(f"Calling `subprocess.run` with {program_and_args=} and {input=}")
+    try:
+        result = subprocess.run(
+            program_and_args,
+            shell=False,
+            capture_output=True,
+            text=True,
+            check=not warn,
+            input=input,
+        )
+    ### Changed:
+    except subprocess.CalledProcessError as e:
+        if hide not in [True, "err", "stderr"]:
+            print(e.stderr, file=sys.stderr)
+        raise e
+    ### End of change.
+    assert result.returncode is not None
+    if warn and result.returncode != 0:
+        message = (
+            f"Command {displayed_command!r}"
+            + (f" with {input=!r}" if input else "")
+            + f" exited with {result.returncode}: {result.stderr=}"
+        )
+        logger.debug(message)
+        if hide is not True:  # don't warn if hide is True.
+            logger.warning(RuntimeWarning(message), stacklevel=2)
+
+    if result.stdout:
+        if hide not in [True, "out", "stdout"]:
+            print(result.stdout)
+        logger.debug(f"{result.stdout=}")
+    if result.stderr:
+        if hide not in [True, "err", "stderr"]:
+            print(result.stderr, file=sys.stderr)
+        logger.debug(f"{result.stderr=}")
+    return result
+
+
+# temporary patch until it's added to milatools.
+milatools.utils.local_v2.run = run
