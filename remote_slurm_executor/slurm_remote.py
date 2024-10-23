@@ -90,7 +90,28 @@ class RemoteSlurmJob(core.Job[OutT]):
             self.cluster, RemoteSlurmInfoWatcher(cluster=cluster, delay_s=600)
         )
         self.remote_dir_sync = remote_dir_sync
-        super().__init__(folder=folder, job_id=job_id, tasks=tasks)
+        # super().__init__(folder=folder, job_id=job_id, tasks=tasks)
+        self._job_id = job_id
+        self._tasks = tuple(tasks)
+        self._sub_jobs: list[RemoteSlurmJob[OutT]] = []
+        self._cancel_at_deletion = False
+        if len(tasks) > 1:
+            # This is a meta-Job
+            self._sub_jobs = [
+                self.__class__(
+                    cluster=cluster,
+                    folder=folder,
+                    job_id=job_id,
+                    remote_dir_sync=self.remote_dir_sync,
+                    tasks=(k,),
+                )
+                for k in self._tasks
+            ]
+        self._paths = utils.JobPaths(folder, job_id=job_id, task_id=self.task_id)
+        self._start_time = _time.time()
+        self._last_status_check = self._start_time  # for the "done()" method
+        # register for state updates with watcher
+        self._register_in_watcher()
 
     def _interrupt(self, timeout: bool = False) -> None:
         """Sends preemption or timeout signal to the job (for testing purpose)

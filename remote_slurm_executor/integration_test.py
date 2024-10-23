@@ -44,6 +44,9 @@ def cluster(request: pytest.FixtureRequest) -> str:
     return getattr(request, "param", "mila")
 
 
+# TODO: Add a test for multiple tasks per job (e.g. ntasks_per_node=2).
+
+
 def test_autoexecutor(cluster: str):
     folder = "logs/%j"
     executor = submitit.AutoExecutor(
