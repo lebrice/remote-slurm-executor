@@ -251,7 +251,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         commit_short = _current_commit_short()
         login_node = self.login_node
 
-        self.sync_source_code(
+        sync_source_code(
             login_node=login_node,
             repo_dir_on_cluster=PurePosixPath(self.repo_dir_on_cluster),
             repo_url=repo_url,
@@ -289,7 +289,8 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # worktree_doesnt_exist = commit_short not in [p[1] for p in worktrees]
 
         _worktree_path = f"$SLURM_TMPDIR/{repo_name}-{commit_short}"
-        self.parameters["setup"] = self.parameters.get("setup", []) + [
+
+        added_setup_block = [
             f"### Added by the {type(self).__name__}",
             f"# {cluster_hostname=}",
             # TODO: Would love to set this, but the --link-mode raises an error below.
@@ -313,7 +314,9 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             "###",
             # Trying out the idea of creating the venv in $SLURM_TMPDIR instead of in the worktree in $HOME.
         ]
+        self.parameters["setup"] = self.parameters.get("setup", []) + added_setup_block
         self.parameters.setdefault("stderr_to_stdout", True)
+        logger.debug(f"Setup: {self.parameters['setup']}")
 
     def submit(
         self, fn: Callable[P, OutT], *args: P.args, **kwargs: P.kwargs
@@ -438,39 +441,6 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         return self._internal_process_submissions(submissions)
 
     # TODO: Move this out?
-    @staticmethod
-    def sync_source_code(
-        login_node: "LoginNode",
-        repo_dir_on_cluster: PurePosixPath,
-        repo_url: str,
-        commit: str,
-    ):
-        """Sync the local source code with the remote cluster."""
-
-        if uncommitted_changes := LocalV2.get_output("git status --porcelain"):
-            console.log(
-                UserWarning(
-                    "You have uncommitted changes! Please consider adding and committing them before re-running the command.\n"
-                    "(This the best way to guarantee that the same code will be used on the remote cluster "
-                    "and helps make your experiments easier to reproduce in the future.)\n"
-                    "Uncommitted changes:\n\n" + textwrap.indent(uncommitted_changes, "\t")
-                ),
-                style="orange3",  # Why the hell isn't 'orange' a colour?!
-            )
-        LocalV2.run("git push", display=True)
-
-        # If the repo doesn't exist on the remote, clone it:
-        if not login_node.dir_exists(repo_dir_on_cluster):
-            login_node.run(f"mkdir -p {repo_dir_on_cluster.parent}")
-            login_node.run(
-                f"git clone {repo_url} {repo_dir_on_cluster}",
-                display=True,
-            )
-
-        # In any case, fetch the latest changes on the remote and checkout that commit.
-        with login_node.chdir(repo_dir_on_cluster):
-            login_node.run("git fetch", display=True)
-            login_node.run(f"git checkout {commit}", display=True)
 
     def setup_uv(self) -> str:
         if not (uv_path := self._get_uv_path()):
@@ -766,3 +736,37 @@ def get_slurm_account(cluster: str) -> str:
     account = sorted(accounts)[-1]
     logger.info(f"Using account {account} to launch jobs.")
     return account
+
+
+def sync_source_code(
+    login_node: LoginNode,
+    repo_dir_on_cluster: PurePosixPath,
+    repo_url: str,
+    commit: str,
+):
+    """Sync the local source code with the remote cluster."""
+
+    if uncommitted_changes := LocalV2.get_output("git status --porcelain"):
+        console.log(
+            UserWarning(
+                "You have uncommitted changes! Please consider adding and committing them before re-running the command.\n"
+                "(This the best way to guarantee that the same code will be used on the remote cluster "
+                "and helps make your experiments easier to reproduce in the future.)\n"
+                "Uncommitted changes:\n\n" + textwrap.indent(uncommitted_changes, "\t")
+            ),
+            style="orange3",  # Why the hell isn't 'orange' a colour?!
+        )
+    LocalV2.run("git push", display=True)
+
+    # If the repo doesn't exist on the remote, clone it:
+    if not login_node.dir_exists(repo_dir_on_cluster):
+        login_node.run(f"mkdir -p {repo_dir_on_cluster.parent}")
+        login_node.run(
+            f"git clone {repo_url} {repo_dir_on_cluster}",
+            display=True,
+        )
+
+    # In any case, fetch the latest changes on the remote and checkout that commit.
+    with login_node.chdir(repo_dir_on_cluster):
+        login_node.run("git fetch", display=True)
+        login_node.run(f"git checkout {commit}", display=True)
