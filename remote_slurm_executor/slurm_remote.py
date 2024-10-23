@@ -3,21 +3,22 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 #
-import contextlib
+import copy
 import dataclasses
 import functools
 import itertools
 import logging
+import re
 import shlex
 import subprocess
 import sys
 import textwrap
-import time
+import time as _time
 import typing as tp
 import uuid
 import warnings
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import KW_ONLY, dataclass
 from pathlib import Path, PurePath, PurePosixPath
 from typing import (
     Any,
@@ -29,13 +30,12 @@ from typing import (
 )
 
 from milatools.cli import console
-from milatools.cli.utils import SSH_CONFIG_FILE
 from milatools.utils.local_v2 import LocalV2
-from milatools.utils.remote_v2 import Hide, RemoteV2
 from submitit.core import core, utils
 from submitit.slurm import slurm
 from submitit.slurm.slurm import SlurmInfoWatcher, SlurmJobEnvironment
-from typing_extensions import override
+
+from remote_slurm_executor.utils import LoginNode, RemoteDirSync
 
 OutT = TypeVar("OutT", covariant=True)
 P = ParamSpec("P")
@@ -49,74 +49,11 @@ logger = logging.getLogger(__name__)
 CURRENT_PYTHON = ".".join(map(str, sys.version_info[:3]))
 
 
-@dataclass(frozen=True)
-class RemoteDirSync:
-    login_node: "LoginNode"
-    remote_dir: PurePosixPath
-    local_dir: Path
-
-    def copy_to_remote(self, local_path: Path) -> PurePosixPath:
-        remote_path = self._get_remote_path(local_path)
-        self._copy_to_remote(local_path, remote_path)
-        return remote_path
-
-    def get_from_remote(
-        self, remote_path: PurePosixPath | None = None, local_path: Path | None = None
-    ) -> Path:
-        assert bool(remote_path) ^ bool(
-            local_path
-        ), "Exactly one of remote_path or local_path should be passed."
-        if remote_path:
-            local_path = self._get_local_path(remote_path)
-        else:
-            assert local_path
-            remote_path = self._get_remote_path(local_path)
-        self._get_from_remote(remote_path=remote_path, local_path=local_path)
-        return local_path
-
-    def _get_remote_path(self, local_path: Path) -> PurePosixPath:
-        return self.remote_dir / (local_path.absolute().relative_to(self.local_dir.absolute()))
-
-    def _get_local_path(self, remote_path: PurePosixPath) -> Path:
-        return self.local_dir / (remote_path.relative_to(self.remote_dir))
-
-    def _copy_to_remote(self, local_path: Path, remote_path: PurePosixPath):
-        assert local_path.is_file()
-        self.login_node.run(f"mkdir -p {remote_path.parent}")
-        # if self.login_node.file_exists(remote_path):
-        self.login_node.local_runner.run(
-            f"scp {local_path} {self.login_node.hostname}:{remote_path}", display=False
-        )
-        # else:
-        #     assert self.login_node.dir_exists(remote_path)
-        #     self.login_node.local_runner.run(
-        #         f"scp -r {local_path} {self.login_node.hostname}:{remote_path}", display=False
-        #     )
-        # Could also perhaps use rsync?
-        # self.login_node.local_runner.run(
-        #     f"rsync --recursive --links --safe-links --update "
-        #     f"{self.local_dir} {self.login_node.hostname}:{self.remote_dir.parent}"
-        # )
-
-    def _get_from_remote(self, remote_path: PurePosixPath, local_path: Path):
-        # todo: switch between rsync and scp based on in the remote path is a file or a dir?
-        local_path.parent.mkdir(exist_ok=True, parents=True)
-        if self.login_node.file_exists(remote_path):
-            self.login_node.local_runner.run(
-                f"scp {self.login_node.hostname}:{remote_path} {local_path}",
-                display=False,
-            )
-        else:
-            assert self.login_node.dir_exists(remote_path)
-            self.login_node.local_runner.run(
-                f"scp -r {self.login_node.hostname}:{remote_path} {local_path}",
-                display=False,
-            )
-        # Could also perhaps use rsync?
-        # self.login_node.local_runner.run(
-        #     f"rsync --recursive --links --safe-links --update "
-        #     f"{self.login_node.hostname}:{self.remote_dir} {self.local_dir.parent}"
-        # )
+# Could also perhaps use rsync?
+# self.login_node.local_runner.run(
+#     f"rsync --recursive --links --safe-links --update "
+#     f"{self.login_node.hostname}:{self.remote_dir} {self.local_dir.parent}"
+# )
 
 
 class RemoteSlurmInfoWatcher(SlurmInfoWatcher):
@@ -199,24 +136,26 @@ class DelayedSubmission(utils.DelayedSubmission, Generic[P, OutT]):
         return super().result()
 
 
-@dataclasses.dataclass(init=False)
+@dataclasses.dataclass()
 class RemoteSlurmExecutor(slurm.SlurmExecutor):
     """Executor for a remote SLURM cluster.
 
-    - Installs `uv` on the remote cluster.
-    - Syncs dependencies with `uv sync --all-extras` on the login node.
+     - Installs `uv` on the remote cluster.
+     - Syncs dependencies with `uv sync --all-extras` on the login node.
 
-    ## TODOs:
-    - [ ] Unable to launch jobs from the `master` branch of a repo, because we try to create a
-          worktree and the branch is already checked out in the cloned repo!
-    - [ ] TODO: Add a tag like {cluster_name}-{job_id} to the commit once we know the job id?
+     ## TODOs / ideas:
+    - [ ] Add a tag like {cluster_name}-{job_id} to the commit once we know the job id?
+    - [ ] Prevent the warning being logged twice (and syncing of source code as well) when launching
+          an array job. Avoid re-creating an executor when submitting array jobs if possible.
     """
 
-    folder: Path
+    folder: str | Path
     """The output folder, for example, "logs/%j".
 
     NOTE: if `remote_folder` is unset, this must be a relative path.
     """
+
+    _: KW_ONLY
 
     cluster_hostname: str
     """Hostname of the cluster to connect to."""
@@ -239,57 +178,46 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
     max_num_timeout: int = 3
     """Maximum number of job timeouts before giving up (from the base class)."""
 
-    python: str | None = None
+    python: str = f"uv run --python={CURRENT_PYTHON} python"
     """Python command.
 
     Defaults to `uv run --python=X.Y python`. Cannot be customized for now.
     """
 
+    _map_count: int | None = None
+
     job_class: ClassVar[type[RemoteSlurmJob]] = RemoteSlurmJob
 
-    def __init__(
-        self,
-        folder: PurePath | str,
-        *,
-        cluster_hostname: str,
-        remote_folder: PurePosixPath | str | None = None,
-        repo_dir_on_cluster: PurePosixPath | str | None = None,
-        internet_access_on_compute_nodes: bool = True,
-        reproducibility_mode: bool = False,
-        max_num_timeout: int = 3,
-        python: str | None = f"uv run --python={CURRENT_PYTHON} python",
-    ) -> None:
+    def __post_init__(self) -> None:
         """Create a new remote slurm executor."""
-        self._original_folder = folder  # save this argument that we'll modify.
-        folder = Path(folder)
+        self._original_folder = self.folder  # save this argument that we'll modify.
+        self.folder = Path(self.folder)
 
-        self.cluster_hostname = cluster_hostname
+        # self.cluster_hostname = cluster_hostname
         self.login_node = LoginNode(self.cluster_hostname)
-        self.internet_access_on_compute_nodes = internet_access_on_compute_nodes
-        self.reproducibility_mode = reproducibility_mode  # TODO: Add tags for jobs (locally only).
+        # self.internet_access_on_compute_nodes = internet_access_on_compute_nodes
+        # self.reproducibility_mode = reproducibility_mode  # TODO: Add tags for jobs (locally only).
 
         # Where we clone the repo on the cluster.
-        if not repo_dir_on_cluster:
-            repo_dir_on_cluster = (
+        if not self.repo_dir_on_cluster:
+            self.repo_dir_on_cluster = str(
                 PurePosixPath(self.login_node.get_output("echo $HOME"))
                 / "repos"
                 / _current_repo_name()
             )
-        # repo_dir_on_cluster = PurePosixPath(repo_dir_on_cluster)
-        self.repo_dir_on_cluster = str(repo_dir_on_cluster)
 
         # "base folder" := last part of `folder` that isn't dependent on the job id or task id (no
         # %j %t, %A, etc).
         # For example: "logs/%j" -> "logs"
-        base_folder = get_first_id_independent_folder(folder)
+        base_folder = get_first_id_independent_folder(self.folder)
         self.local_base_folder = Path(base_folder).absolute()
 
         # This is the folder where we store the pickle files on the remote.
-        if not remote_folder:
-            assert not folder.is_absolute()
+        if not self.remote_folder:
+            assert not self.folder.is_absolute()
             _remote_scratch = PurePosixPath(self.login_node.get_output("echo $SCRATCH"))
-            remote_folder = _remote_scratch / folder.relative_to(base_folder)
-        self.remote_folder = str(remote_folder)
+            self.remote_folder = str(_remote_scratch / self.folder.relative_to(base_folder))
+
         self.remote_base_folder = get_first_id_independent_folder(
             PurePosixPath(self.remote_folder)
         )
@@ -300,7 +228,16 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             remote_dir=self.remote_base_folder,
         )
 
-        super().__init__(folder=folder, max_num_timeout=max_num_timeout, python=python)
+        if (
+            not self.internet_access_on_compute_nodes
+            and "uv" in self.python
+            and "--offline" not in self.python
+        ):
+            self.python = self.python.replace("uv", "uv --offline")
+
+        super().__init__(
+            folder=self.folder, max_num_timeout=self.max_num_timeout, python=self.python
+        )
 
         # Note: It seems like we really need to specify the full path to uv since `srun --pty uv`
         # doesn't work?
@@ -308,7 +245,10 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # todo: Is this --offline flag actually useful?
         # offline = "--offline " if not self.internet_access_on_compute_nodes else ""
         # self.python = f"{uv_path} run --python={CURRENT_PYTHON} python"
-        sync_dependencies_command = f"uv sync --python={CURRENT_PYTHON} --all-extras --frozen"
+        setup_python_command = f"{_uv_path} python install {CURRENT_PYTHON}"
+        sync_dependencies_command = (
+            f"{_uv_path} sync --python={CURRENT_PYTHON} --all-extras --frozen"
+        )
 
         repo_url = _current_repo_url()
         repo_name = _current_repo_name()
@@ -316,22 +256,23 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         commit_short = _current_commit_short()
         login_node = self.login_node
 
-        self.sync_source_code(
+        sync_source_code(
             login_node=login_node,
             repo_dir_on_cluster=PurePosixPath(self.repo_dir_on_cluster),
             repo_url=repo_url,
             commit=commit,
         )
 
-        if not internet_access_on_compute_nodes:
+        if not self.internet_access_on_compute_nodes:
             logger.info(
                 "Syncing the dependencies on the login node once, so that they are in the cache "
                 "and available for the job later."
             )
-            with login_node.chdir(repo_dir_on_cluster):
-                # Assume that we've already synced the code and the dependencies.
+            with login_node.chdir(self.repo_dir_on_cluster):
+                # Assume that we've already synced the code.
                 # IDEA: IF there is internet access on the compute nodes, then perhaps we could sync
                 # the dependencies on a compute node instead of on the login nodes?
+                login_node.run(setup_python_command, display=True)
                 login_node.run(sync_dependencies_command, display=True)
                 # NOTE: We could also remove the venv since we mainly want the dependencies to be downloaded
                 # to the cache.
@@ -354,16 +295,17 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # worktree_doesnt_exist = commit_short not in [p[1] for p in worktrees]
 
         _worktree_path = f"$SLURM_TMPDIR/{repo_name}-{commit_short}"
-        self.parameters["setup"] = self.parameters.get("setup", []) + [
+
+        added_setup_block = [
             f"### Added by the {type(self).__name__}",
-            f"# {cluster_hostname=}",
+            f"# cluster_hostname={self.cluster_hostname}",
             # TODO: Would love to set this, but the --link-mode raises an error below.
             "set -e  # Exit immediately if a command exits with a non-zero status.",
             "export UV_PYTHON_PREFERENCE='managed'  # Prefer using the python managed by uv over the system's python.",
             "export UV_LINK_MODE='copy'  # Don't quit the job if we can't use hardlinks from the cache.",
             "source $HOME/.cargo/env  # Needed so we can run `uv` in a non-interactive job, apparently.",
             (
-                f"git clone {repo_dir_on_cluster} {_worktree_path}"
+                f"git clone {self.repo_dir_on_cluster} {_worktree_path}"
                 # f"git worktree add {_worktree_path} {commit} --force --force --detach --lock "
                 # '--reason="Locked for reproducibility: This code was used in job $SLURM_JOB_ID"'
                 # if worktree_doesnt_exist
@@ -378,7 +320,9 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             "###",
             # Trying out the idea of creating the venv in $SLURM_TMPDIR instead of in the worktree in $HOME.
         ]
+        self.parameters["setup"] = self.parameters.get("setup", []) + added_setup_block
         self.parameters.setdefault("stderr_to_stdout", True)
+        logger.debug(f"Setup: {self.parameters['setup']}")
 
     def submit(
         self, fn: Callable[P, OutT], *args: P.args, **kwargs: P.kwargs
@@ -398,9 +342,34 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
     def process_submission(self, ds: DelayedSubmission[..., OutT]) -> RemoteSlurmJob[OutT]:
         # NOTE: Expanded (copied) from the base class, just to see what's going on.
-        timeout_min = self.parameters.get("time", 5)
+        time = self.parameters.get("time", 5)
+        if isinstance(time, int):
+            timeout_min = time
+        else:
+            from datetime import datetime, timedelta
+
+            # full timestamp with milliseconds
+            if re.match(r"\d+-\d{1,2}:\d{1,2}:\d{1,2}", time):
+                t = datetime.strptime(time, "%d-%H:%M:%S")
+                delta = timedelta(days=t.day, hours=t.hour, minutes=t.minute, seconds=t.second)
+                timeout_min = int(delta.total_seconds() // 60)
+            elif re.match(r"\d{1,2}:\d{1,2}:\d{1,2}", time):
+                t = datetime.strptime(time, "%H:%M:%S")
+                delta = timedelta(hours=t.hour, minutes=t.minute, seconds=t.second)
+                timeout_min = int(delta.total_seconds() // 60)
+            elif re.match(r"\d{1,2}:\d{1,2}", time):
+                t = datetime.strptime(time, "%M:%S")
+                delta = timedelta(minutes=t.minute, seconds=t.second)
+                timeout_min = int(delta.total_seconds() // 60)
+            else:
+                raise NotImplementedError(
+                    f"Can't infer job duration in minutes (for submitit) from --time flag: '{time}'"
+                )
+            # # unknown timestamp format
+            # return false
+
         tmp_uuid = uuid.uuid4().hex
-        local_pickle_path = get_first_id_independent_folder(self.folder) / f"{tmp_uuid}.pkl"
+        local_pickle_path = get_first_id_independent_folder(Path(self.folder)) / f"{tmp_uuid}.pkl"
         local_pickle_path.parent.mkdir(parents=True, exist_ok=True)
         ds.set_timeout(timeout_min, self.max_num_timeout)
         ds.dump(local_pickle_path)
@@ -409,7 +378,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # self.remote_dir_sync.sync_to_remote()
 
         self._throttle()
-        self._last_job_submitted = time.time()
+        self._last_job_submitted = _time.time()
         # NOTE: Choosing to remove the submission file, instead of making it a symlink like in the
         # base class.
         job = self._submit_command(self._submitit_command_str, _keep_sbatch_file_as_symlink=False)
@@ -493,39 +462,6 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         return self._internal_process_submissions(submissions)
 
     # TODO: Move this out?
-    @staticmethod
-    def sync_source_code(
-        login_node: "LoginNode",
-        repo_dir_on_cluster: PurePosixPath,
-        repo_url: str,
-        commit: str,
-    ):
-        """Sync the local source code with the remote cluster."""
-
-        if uncommitted_changes := LocalV2.get_output("git status --porcelain"):
-            console.log(
-                UserWarning(
-                    "You have uncommitted changes! Please consider adding and committing them before re-running the command.\n"
-                    "(This the best way to guarantee that the same code will be used on the remote cluster "
-                    "and helps make your experiments easier to reproduce in the future.)\n"
-                    "Uncommitted changes:\n\n" + textwrap.indent(uncommitted_changes, "\t")
-                ),
-                style="orange3",  # Why the hell isn't 'orange' a colour?!
-            )
-        LocalV2.run("git push", display=True)
-
-        # If the repo doesn't exist on the remote, clone it:
-        if not login_node.dir_exists(repo_dir_on_cluster):
-            login_node.run(f"mkdir -p {repo_dir_on_cluster.parent}")
-            login_node.run(
-                f"git clone {repo_url} {repo_dir_on_cluster}",
-                display=True,
-            )
-
-        # In any case, fetch the latest changes on the remote and checkout that commit.
-        with login_node.chdir(repo_dir_on_cluster):
-            login_node.run("git fetch", display=True)
-            login_node.run(f"git checkout {commit}", display=True)
 
     def setup_uv(self) -> str:
         if not (uv_path := self._get_uv_path()):
@@ -540,14 +476,15 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
     def _get_uv_path(self) -> str | None:
         return (
-            LocalV2.get_output(
-                ("ssh", self.cluster_hostname, "which", "uv"),
+            self.login_node.get_output(
+                "which uv",
                 warn=True,
+                hide=True,
             )
-            or LocalV2.get_output(
-                ("ssh", self.cluster_hostname, "bash", "-l", "which", "uv"),
-                warn=True,
-            )
+            # or LocalV2.get_output(
+            #     ("ssh", self.cluster_hostname, "bash", "-l", "which", "uv"),
+            #     warn=True,
+            # )
             or None
         )
 
@@ -656,24 +593,38 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # NOTE: I don't yet understand this part here. Why do they create a cloned executor?
         # Seems like poor design to me.
 
-        # Make a copy of the executor, since we don't want other jobs to be
-        # scheduled as arrays.
-        array_ex = RemoteSlurmExecutor(
-            folder=self.folder,
-            cluster_hostname=self.cluster_hostname,
-            remote_folder=self.remote_folder,
-            repo_dir_on_cluster=self.repo_dir_on_cluster,
-            internet_access_on_compute_nodes=self.internet_access_on_compute_nodes,
-            max_num_timeout=self.max_num_timeout,
-            python=self.python,
-            reproducibility_mode=self.reproducibility_mode,
-        )
-        array_ex.update_parameters(**self.parameters)
-        array_ex.parameters["map_count"] = n
+        # "Make a copy of the executor, since we don't want other jobs to be
+        # scheduled as arrays." (TODO: What does this mean?)
+        # array_ex = RemoteSlurmExecutor(
+        #     folder=self.folder,
+        #     cluster_hostname=self.cluster_hostname,
+        #     remote_folder=self.remote_folder,
+        #     repo_dir_on_cluster=self.repo_dir_on_cluster,
+        #     internet_access_on_compute_nodes=self.internet_access_on_compute_nodes,
+        #     max_num_timeout=self.max_num_timeout,
+        #     python=self.python,
+        #     reproducibility_mode=self.reproducibility_mode,
+        # )
+        # array_ex.update_parameters(**self.parameters)
+        # array_ex.parameters["map_count"] = n
+
+        array_ex = copy.deepcopy(self)
+        array_ex._delayed_batch = None  # I imagine that this is what they wanted to not propagate?
+        # Can't even use .update_parameters() because `map_count` isn't allowed?
+        array_ex._map_count = n
+        # array_ex.update_parameters(map_count=n)
+
+        # slurm._make_sbatch_string  # Uncomment to look at the code with ctrl+click.
+        # THis is where "map_count" is used in _make_sbatch_string:
+        # if map_count is not None:
+        #     assert isinstance(map_count, int) and map_count
+        #     parameters["array"] = f"0-{map_count - 1}%{min(map_count, array_parallelism)}"
+        #     stdout = stdout.replace("%j", "%A_%a")
+        #     stderr = stderr.replace("%j", "%A_%a")
 
         self._throttle()
         # Maybe that's an example of a case where we want to keep the submission file as a symlink?
-        # WHY aren't they using `array_ex.submit_map`?!
+        # WHY not use `array_ex.submit` here?
         first_job: core.Job[tp.Any] = array_ex._submit_command(
             self._submitit_command_str, _keep_sbatch_file_as_symlink=True
         )
@@ -711,7 +662,10 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         #     command=command, folder=self.remote_folder, **self.parameters
         # )
         content_with_local_paths = slurm._make_sbatch_string(
-            command=command, folder=self.folder, **self.parameters
+            command=command,
+            folder=self.folder,
+            **self.parameters,
+            map_count=self._map_count,
         )
         content_with_remote_paths = content_with_local_paths.replace(
             str(self.local_base_folder.absolute()), str(self.remote_base_folder)
@@ -719,8 +673,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
         # Note: annoying, but seems like `srun_args` is fed through shlex.quote or
         # something, which causes issues with the evaluation of variables.
-        chdir_to_worktree = "--chdir=$WORKTREE_LOCATION"
-        return content_with_remote_paths.replace(f"'{chdir_to_worktree}'", chdir_to_worktree)
+        return content_with_remote_paths
 
     def _num_tasks(self) -> int:
         nodes: int = self.parameters.get("nodes", 1)
@@ -740,128 +693,8 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
     @classmethod
     def affinity(cls) -> int:
-        return 2
         # return -1 if shutil.which("srun") is None else 2
-
-
-@dataclasses.dataclass(init=False)
-class LoginNode(RemoteV2):
-    # Tiny improvements / changes to the RemoteV2 class from milatools.
-
-    command_prefix: str = ""
-
-    def __init__(
-        self,
-        hostname: str,
-        *,
-        control_path: Path | None = None,
-        ssh_config_path: Path = SSH_CONFIG_FILE,
-        _start_control_socket: bool = True,
-        command_prefix: str = "",
-    ):
-        super().__init__(
-            hostname,
-            control_path=control_path,
-            ssh_config_path=ssh_config_path,
-            _start_control_socket=_start_control_socket,
-        )
-        self._start_control_socket = _start_control_socket
-        self.command_prefix = command_prefix
-
-    def dir_exists(self, remote_dir: PurePosixPath | str) -> bool:
-        return (
-            self.run(
-                f"test -d {remote_dir}",
-                warn=True,
-                hide=True,
-                display=False,
-            ).returncode
-            == 0
-        )
-
-    def file_exists(self, remote_dir: PurePosixPath | str) -> bool:
-        return (
-            self.run(
-                f"test -f {remote_dir}",
-                warn=True,
-                hide=True,
-                display=False,
-            ).returncode
-            == 0
-        )
-
-    @contextlib.contextmanager
-    def chdir(self, remote_dir: PurePosixPath | str):
-        before = self.command_prefix
-        if self.command_prefix:
-            self.command_prefix = f"{self.command_prefix} && cd {remote_dir} && "
-        else:
-            self.command_prefix = f"cd {remote_dir} && "
-
-        yield
-
-        self.command_prefix = before
-
-    def cd(self, remote_dir: PurePosixPath | str):
-        cd_command = f"cd {remote_dir}"
-        if self.command_prefix:
-            new_prefix = f"{self.command_prefix} && {cd_command}"
-        else:
-            new_prefix = cd_command
-        return type(self)(
-            hostname=self.hostname,
-            control_path=self.control_path,
-            ssh_config_path=self.ssh_config_path,
-            _start_control_socket=self._start_control_socket,
-            command_prefix=new_prefix,
-        )
-
-    def display(self, command: str, input: str | None = None, _stack_offset: int = 3):
-        message = f"({self.hostname}) $ {command}"
-        if input:
-            message += f"\n{input}"
-
-        console.log(message, style="green", _stack_offset=_stack_offset)
-
-    @override
-    def run(
-        self,
-        command: str,
-        *,
-        input: str | None = None,
-        display: bool = False,  # changed to default of False
-        warn: bool = False,
-        hide: Hide = False,
-    ):
-        if display:
-            self.display(command, input=input, _stack_offset=3)
-        return super().run(
-            self.command_prefix + command,
-            input=input,
-            display=False,
-            warn=warn,
-            hide=hide,
-        )
-
-    @override
-    async def run_async(
-        self,
-        command: str,
-        *,
-        input: str | None = None,
-        display: bool = False,  # changed to default of False
-        warn: bool = False,
-        hide: Hide = False,
-    ) -> subprocess.CompletedProcess[str]:
-        if display:
-            self.display(command, input=input, _stack_offset=3)
-        return await super().run_async(
-            self.command_prefix + command,
-            input=input,
-            display=False,
-            warn=warn,
-            hide=hide,
-        )
+        return 2
 
 
 _Path = TypeVar("_Path", bound=PurePath)
@@ -929,3 +762,37 @@ def get_slurm_account(cluster: str) -> str:
     account = sorted(accounts)[-1]
     logger.info(f"Using account {account} to launch jobs.")
     return account
+
+
+def sync_source_code(
+    login_node: LoginNode,
+    repo_dir_on_cluster: PurePosixPath,
+    repo_url: str,
+    commit: str,
+):
+    """Sync the local source code with the remote cluster."""
+
+    if uncommitted_changes := LocalV2.get_output("git status --porcelain"):
+        console.log(
+            UserWarning(
+                "You have uncommitted changes! Please consider adding and committing them before re-running the command.\n"
+                "(This the best way to guarantee that the same code will be used on the remote cluster "
+                "and helps make your experiments easier to reproduce in the future.)\n"
+                "Uncommitted changes:\n\n" + textwrap.indent(uncommitted_changes, "\t")
+            ),
+            style="orange3",  # Why the hell isn't 'orange' a colour?!
+        )
+    LocalV2.run("git push", display=True)
+
+    # If the repo doesn't exist on the remote, clone it:
+    if not login_node.dir_exists(repo_dir_on_cluster):
+        login_node.run(f"mkdir -p {repo_dir_on_cluster.parent}")
+        login_node.run(
+            f"git clone {repo_url} {repo_dir_on_cluster}",
+            display=True,
+        )
+
+    # In any case, fetch the latest changes on the remote and checkout that commit.
+    with login_node.chdir(repo_dir_on_cluster):
+        login_node.run("git fetch", display=True)
+        login_node.run(f"git checkout {commit}", display=True, hide=True)
