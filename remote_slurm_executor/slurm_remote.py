@@ -158,7 +158,7 @@ class DelayedSubmission(utils.DelayedSubmission, Generic[P, OutT]):
         return super().result()
 
 
-@dataclasses.dataclass()
+@dataclasses.dataclass(init=True)
 class RemoteSlurmExecutor(slurm.SlurmExecutor):
     """Executor for a remote SLURM cluster.
 
@@ -214,13 +214,18 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
     """Internally used to tell if the syncing of source code and dependencies has already been
     done."""
 
+    login_node: LoginNode | None = dataclasses.field(default=None, repr=False)
+
+    _allow_implicit_submissions: bool = False
+
     def __post_init__(self) -> None:
         """Create a new remote slurm executor."""
         self._original_folder = self.folder  # save this argument that we'll modify.
         self.folder = Path(self.folder)
 
         # self.cluster_hostname = cluster_hostname
-        self.login_node = LoginNode(self.cluster_hostname)
+        if self.login_node is None:
+            self.login_node = LoginNode(self.cluster_hostname)
         # self.internet_access_on_compute_nodes = internet_access_on_compute_nodes
         # self.reproducibility_mode = reproducibility_mode  # TODO: Add tags for jobs (locally only).
 
