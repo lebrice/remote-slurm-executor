@@ -19,6 +19,7 @@ import uuid
 import warnings
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import KW_ONLY, dataclass
+from datetime import datetime, timedelta
 from pathlib import Path, PurePath, PurePosixPath
 from typing import (
     Any,
@@ -209,6 +210,10 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
 
     job_class: ClassVar[type[RemoteSlurmJob]] = RemoteSlurmJob
 
+    _synced: bool = False
+    """Internally used to tell if the syncing of source code and dependencies has already been
+    done."""
+
     def __post_init__(self) -> None:
         """Create a new remote slurm executor."""
         self._original_folder = self.folder  # save this argument that we'll modify.
@@ -259,7 +264,12 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         super().__init__(
             folder=self.folder, max_num_timeout=self.max_num_timeout, python=self.python
         )
+        if not self._synced:
+            self.sync()
+        self._synced = True
 
+    def sync(self) -> None:
+        """Sync and prepare everything for remote execution of the eventual jobs."""
         # Note: It seems like we really need to specify the full path to uv since `srun --pty uv`
         # doesn't work?
         _uv_path: str = self.setup_uv()
@@ -299,23 +309,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
                 # to the cache.
                 # self.login_node.run("rm -r .venv")
 
-        # Note: Here we avoid mutating the passed in lists or dicts.
-        # self.parameters["srun_args"] = (
-        #     self.parameters.get("srun_args", [])
-        #     # TODO: How do we --chdir to $SLURM_TMPDIR, since that might (in principle) be different
-        #     # within each srun context when working with multiple nodes?
-        #     # + [f"--chdir={self.worktree_path}"]
-        # )
-
-        # worktrees = [
-        #     (_path := PurePosixPath((_parts := line.split())[0]), _ref := _parts[1])
-        #     for line in login_node.cd(repo_dir_on_cluster)
-        #     .get_output("git worktree list")
-        #     .splitlines()
-        # ]
-        # worktree_doesnt_exist = commit_short not in [p[1] for p in worktrees]
-
-        _worktree_path = f"$SLURM_TMPDIR/{repo_name}-{commit_short}"
+        _job_source_path = f"$SLURM_TMPDIR/{repo_name}-{commit_short}"
 
         added_setup_block = [
             f"### Added by the {type(self).__name__}",
@@ -326,7 +320,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
             "export UV_LINK_MODE='copy'  # Don't quit the job if we can't use hardlinks from the cache.",
             "source $HOME/.cargo/env  # Needed so we can run `uv` in a non-interactive job, apparently.",
             (
-                f"git clone {self.repo_dir_on_cluster} {_worktree_path}"
+                f"git clone {self.repo_dir_on_cluster} {_job_source_path}"
                 # f"git worktree add {_worktree_path} {commit} --force --force --detach --lock "
                 # '--reason="Locked for reproducibility: This code was used in job $SLURM_JOB_ID"'
                 # if worktree_doesnt_exist
@@ -336,7 +330,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
                 # gitdir: /home/mila/n/normandf/repos/remote-slurm-executor/.git/worktrees/remote-slurm-executor-1057174
                 # else f"git worktree repair {_worktree_path}"
             ),
-            f"cd {_worktree_path}",
+            f"cd {_job_source_path}",
             f"git reset --hard {commit}",
             "###",
             # Trying out the idea of creating the venv in $SLURM_TMPDIR instead of in the worktree in $HOME.
@@ -367,27 +361,7 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         if isinstance(time, int):
             timeout_min = time
         else:
-            from datetime import datetime, timedelta
-
-            # full timestamp with milliseconds
-            if re.match(r"\d+-\d{1,2}:\d{1,2}:\d{1,2}", time):
-                t = datetime.strptime(time, "%d-%H:%M:%S")
-                delta = timedelta(days=t.day, hours=t.hour, minutes=t.minute, seconds=t.second)
-                timeout_min = int(delta.total_seconds() // 60)
-            elif re.match(r"\d{1,2}:\d{1,2}:\d{1,2}", time):
-                t = datetime.strptime(time, "%H:%M:%S")
-                delta = timedelta(hours=t.hour, minutes=t.minute, seconds=t.second)
-                timeout_min = int(delta.total_seconds() // 60)
-            elif re.match(r"\d{1,2}:\d{1,2}", time):
-                t = datetime.strptime(time, "%M:%S")
-                delta = timedelta(minutes=t.minute, seconds=t.second)
-                timeout_min = int(delta.total_seconds() // 60)
-            else:
-                raise NotImplementedError(
-                    f"Can't infer job duration in minutes (for submitit) from --time flag: '{time}'"
-                )
-            # # unknown timestamp format
-            # return false
+            timeout_min = get_timeout_min_from_sbatch_time_flag(time)
 
         tmp_uuid = uuid.uuid4().hex
         local_pickle_path = get_first_id_independent_folder(Path(self.folder)) / f"{tmp_uuid}.pkl"
@@ -636,10 +610,15 @@ class RemoteSlurmExecutor(slurm.SlurmExecutor):
         # array_ex.update_parameters(**self.parameters)
         # array_ex.parameters["map_count"] = n
 
+        # TODO: If we used `dataclasses.replace` here, `parameters` is reset in the new object,
+        # which is a bit strange. Perhaps it's not a proper dataclass field for some reason?
+        # Using deepcopy instead.
         array_ex = copy.deepcopy(self)
-        array_ex._delayed_batch = None  # I imagine that this is what they wanted to not propagate?
-        # Can't even use .update_parameters() because `map_count` isn't allowed?
         array_ex._map_count = n
+        array_ex._delayed_batch = None
+        # array_ex._delayed_batch = None  # I imagine that this is what they wanted to not propagate?
+        # Can't even use .update_parameters() because `map_count` isn't allowed?
+        # array_ex._map_count = n
         # array_ex.update_parameters(map_count=n)
 
         # slurm._make_sbatch_string  # Uncomment to look at the code with ctrl+click.
@@ -824,3 +803,35 @@ def sync_source_code(
     with login_node.chdir(repo_dir_on_cluster):
         login_node.run("git fetch", display=True)
         login_node.run(f"git checkout {commit}", display=True, hide=True)
+
+
+def get_timeout_min_from_sbatch_time_flag(time: str) -> int:
+    """Gets the number of minutes in the given --time flag for sbatch.
+
+    >>> get_timeout_min_from_sbatch_time_flag("00:05:00")
+    5
+    >>> get_timeout_min_from_sbatch_time_flag("5:20")
+    5
+    >>> get_timeout_min_from_sbatch_time_flag("01:05:00")
+    65
+    >>> get_timeout_min_from_sbatch_time_flag("1-00:00:00")
+    1440
+    >>> get_timeout_min_from_sbatch_time_flag("5")
+    5
+    """
+    if re.match(r"\d+-\d{1,2}:\d{1,2}:\d{1,2}", time):
+        t = datetime.strptime(time, "%d-%H:%M:%S")
+        delta = timedelta(days=t.day, hours=t.hour, minutes=t.minute, seconds=t.second)
+    elif re.match(r"\d{1,2}:\d{1,2}:\d{1,2}", time):
+        t = datetime.strptime(time, "%H:%M:%S")
+        delta = timedelta(hours=t.hour, minutes=t.minute, seconds=t.second)
+    elif re.match(r"\d{1,2}:\d{1,2}", time):
+        t = datetime.strptime(time, "%M:%S")
+        delta = timedelta(minutes=t.minute, seconds=t.second)
+    elif re.match(r"\d+", time):
+        delta = timedelta(minutes=int(time))
+    else:
+        raise NotImplementedError(
+            f"Can't infer job duration in minutes (for submitit) from --time flag: '{time}'"
+        )
+    return int(delta.total_seconds() // 60)
